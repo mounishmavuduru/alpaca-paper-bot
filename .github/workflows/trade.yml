@@ -1,0 +1,26 @@
+name: Alpaca RSI-2 Paper Bot
+# Runs in GitHub's cloud — no laptop needed. Weekdays ~after US market close.
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'   # 21:30 UTC weekdays (~4:30pm ET in summer, 4:30pm ET in winter)
+  workflow_dispatch: {}        # also gives you a manual "Run" button in the Actions tab
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run the bot
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          # Variables below are optional — set them in repo Settings > Variables to override defaults.
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}            # 'true' = log only (safe). Set 'false' to actually trade paper.
+          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM' }} # ETFs the strategy loves
+          ALLOC_PCT: ${{ vars.ALLOC_PCT || '20' }}          # % of paper equity per position
+          MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '3' }}   # max concurrent holdings
+          KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}   # set 'true' to halt all trading
+        run: node bot.mjs
