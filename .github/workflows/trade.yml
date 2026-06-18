@@ -19,7 +19,7 @@ jobs:
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           # Variables below are optional — set them in repo Settings > Variables to override defaults.
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}            # 'true' = log only (safe). Set 'false' to actually trade paper.
-          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM' }} # ETFs the strategy loves
+          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,IWM,EEM,GLD,TLT' }} # ETFs the 528-market test showed the strategy loves (broad/intl/commodity/bond)
           ALLOC_PCT: ${{ vars.ALLOC_PCT || '20' }}          # % of paper equity per position
           MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '3' }}   # max concurrent holdings
           KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}   # set 'true' to halt all trading
