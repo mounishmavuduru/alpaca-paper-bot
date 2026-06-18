@@ -16,6 +16,9 @@ const MAX_POSITIONS = Number(process.env.MAX_POSITIONS || '3'); // max concurren
 // the whole market is ALSO oversold. SPY_MAX_RSI2 gates buys to those high-conviction windows.
 // 100 = off (take every dip, the base strategy). Try 50 = only buy dips when SPY is also weak.
 const SPY_MAX_RSI2 = Number(process.env.SPY_MAX_RSI2 || '100');
+// RESEARCH-MANDATED crash protection: the no-stop RSI-2 original wipes out in 2008/2020/2022
+// (RSI sits <5 in freefall). Exit a position if it falls STOP_PCT below entry OR closes below its 200-SMA.
+const STOP_PCT = Number(process.env.STOP_PCT || '7') / 100;
 
 if (!KEY || !SECRET) { console.error('FATAL: missing ALPACA_KEY / ALPACA_SECRET.'); process.exit(1); }
 if (KILL) { console.log('KILL_SWITCH=true — exiting without trading.'); process.exit(0); }
@@ -49,9 +52,13 @@ async function bars(sym) { const r = await fetch(`https://query1.finance.yahoo.c
       const sma200 = c.slice(-200).reduce((a, b) => a + b, 0) / 200;
       const rsi2 = wilderRSI(c, 2);
       const haveIt = held.has(sym);
+      const pos = positions.find(p => p.symbol === sym);
+      const lossPct = pos ? (last - Number(pos.avg_entry_price)) / Number(pos.avg_entry_price) : 0;
       const tag = `${sym} $${last.toFixed(2)} rsi2=${rsi2.toFixed(0)} ${last > sma200 ? 'uptrend' : 'downtrend'}`;
       const buy = !haveIt && last > sma200 && rsi2 < 5;
-      const sell = haveIt && rsi2 > 65;
+      // exits: bounce (original) OR research-mandated stops — trend break (<200SMA) or hard catastrophic stop
+      const sellReason = !haveIt ? '' : rsi2 > 65 ? 'bounce RSI>65' : last < sma200 ? 'trend break <200SMA' : lossPct <= -STOP_PCT ? `hard stop ${(lossPct * 100).toFixed(1)}%` : '';
+      const sell = haveIt && sellReason !== '';
 
       if (buy) {
         if (spyRsi2 != null && spyRsi2 >= SPY_MAX_RSI2) { console.log(`${tag} → BUY signal, but market not weak enough (SPY RSI-2 ${spyRsi2.toFixed(0)} ≥ ${SPY_MAX_RSI2}) → skip`); continue; }
@@ -61,9 +68,8 @@ async function bars(sym) { const r = await fetch(`https://query1.finance.yahoo.c
         if (DRY_RUN) console.log(`${tag} → 🟢 WOULD BUY ${qty} @ market`);
         else { await aPost('/v2/orders', { symbol: sym, qty, side: 'buy', type: 'market', time_in_force: 'day' }); console.log(`${tag} → 🟢 BUY ${qty} placed ✅`); held.add(sym); }
       } else if (sell) {
-        const pos = positions.find(p => p.symbol === sym);
-        if (DRY_RUN) console.log(`${tag} → 🔴 WOULD SELL ${pos.qty} @ market`);
-        else { await aPost('/v2/orders', { symbol: sym, qty: Number(pos.qty), side: 'sell', type: 'market', time_in_force: 'day' }); console.log(`${tag} → 🔴 SELL ${pos.qty} placed ✅`); }
+        if (DRY_RUN) console.log(`${tag} → 🔴 WOULD SELL ${pos.qty} @ market (${sellReason})`);
+        else { await aPost('/v2/orders', { symbol: sym, qty: Number(pos.qty), side: 'sell', type: 'market', time_in_force: 'day' }); console.log(`${tag} → 🔴 SELL ${pos.qty} placed ✅ (${sellReason})`); }
       } else {
         console.log(`${tag} → ${haveIt ? 'holding, no exit yet' : 'flat, no dip yet'}`);
       }

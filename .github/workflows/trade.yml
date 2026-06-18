@@ -23,4 +23,5 @@ jobs:
           ALLOC_PCT: ${{ vars.ALLOC_PCT || '20' }}          # % of paper equity per position
           MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '3' }}   # max concurrent holdings
           KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}   # set 'true' to halt all trading
+          STOP_PCT: ${{ vars.STOP_PCT || '7' }}             # hard stop-loss %: exit if a position falls this far below entry (crash protection)
         run: node bot.mjs

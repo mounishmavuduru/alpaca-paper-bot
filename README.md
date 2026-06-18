@@ -52,6 +52,9 @@ Now it places real (paper) orders. Watch your Alpaca paper dashboard fill up.
 | `ALLOC_PCT` | `20` | % of equity per position. |
 | `MAX_POSITIONS` | `3` | Max holdings at once. |
 | `KILL_SWITCH` | `false` | Set `true` to halt ALL trading instantly. |
+| `STOP_PCT` | `7` | Hard stop-loss %: sell a position if it falls this far below entry (crash protection). |
+
+**Exits (3 ways a position is sold):** the bounce (RSI-2 > 65), a **trend break** (price closes below its 200-day average), or a **hard stop** (down `STOP_PCT`% from entry). The two stops are research-mandated — the no-stop version wipes out in 2008/2020/2022 crashes.
 
 ## Safety built in
 - DRY-RUN by default · position caps · kill switch · per-symbol error isolation · only trades your listed ETFs · market orders fill at next open (no lookahead).
