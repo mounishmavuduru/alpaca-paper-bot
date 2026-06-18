@@ -1,0 +1,24 @@
+name: Sector Rotation Bot
+# Monthly rotation into the top-3 momentum sectors. Runs once a month, in the cloud.
+on:
+  schedule:
+    - cron: '30 21 1 * *'   # 1st of each month, 21:30 UTC (orders queue to next open if market closed)
+  workflow_dispatch: {}      # manual "Run" button
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run rotation bot
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+          KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}
+          SECTORS: ${{ vars.SECTORS || 'XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC' }}
+          TOP_N: ${{ vars.TOP_N || '3' }}
+        run: node rotation_bot.mjs

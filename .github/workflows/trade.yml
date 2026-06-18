@@ -19,9 +19,9 @@ jobs:
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           # Variables below are optional — set them in repo Settings > Variables to override defaults.
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}            # 'true' = log only (safe). Set 'false' to actually trade paper.
-          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,IWM,EEM,GLD,TLT' }} # ETFs the 528-market test showed the strategy loves (broad/intl/commodity/bond)
-          ALLOC_PCT: ${{ vars.ALLOC_PCT || '20' }}          # % of paper equity per position
-          MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '3' }}   # max concurrent holdings
+          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM,VTI,MDY,XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC,SMH,SOXX,XBI,KRE,ITB,XOP,GDX,EEM,EFA,FXI,EWZ,TLT,IEF,HYG,GLD,SLV' }} # 33 liquid ETFs across asset classes — more markets = dips fire more often
+          ALLOC_PCT: ${{ vars.ALLOC_PCT || '15' }}          # % of paper equity per position
+          MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '6' }}   # max concurrent holdings (raised for the wider universe)
           KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}   # set 'true' to halt all trading
           STOP_PCT: ${{ vars.STOP_PCT || '7' }}             # hard stop-loss %: exit if a position falls this far below entry (crash protection)
         run: node bot.mjs
