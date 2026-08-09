@@ -1,10 +1,12 @@
 {
   "name": "alpaca-paper-bot",
-  "version": "1.0.0",
-  "description": "RSI-2 dip-buyer bot for Alpaca paper trading, scheduled via GitHub Actions.",
+  "version": "2.0.0",
+  "description": "Hardened RSI-2 dip-buyer + sector-rotation bots for Alpaca paper trading, scheduled via GitHub Actions.",
   "type": "module",
   "private": true,
   "scripts": {
-    "trade": "node bot.mjs"
+    "trade": "node bot.mjs",
+    "rotate": "node rotation_bot.mjs",
+    "test": "node --test test/indicators.test.mjs test/config.test.mjs test/bots.test.mjs"
   }
 }

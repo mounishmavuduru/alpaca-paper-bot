@@ -1,0 +1,22 @@
+name: Tests
+# Runs the full suite (unit + mock-broker integration) on every code change.
+# Journal commits use [skip ci] and GITHUB_TOKEN (which never triggers workflows anyway).
+on:
+  push:
+    paths-ignore:
+      - 'journal/**'
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+      - run: npm test

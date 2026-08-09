@@ -1,27 +1,75 @@
 name: Alpaca RSI-2 Paper Bot
-# Runs in GitHub's cloud — no laptop needed. Weekdays ~after US market close.
+# Runs in GitHub's cloud after the US close. 21:47 UTC = 5:47pm EDT (summer) / 4:47pm EST
+# (winter) — always after the 4pm ET close (and after 1pm early closes). Off-the-half-hour
+# minute avoids GitHub's busiest cron slots (delays/drops cluster at :00 and :30).
 on:
   schedule:
-    - cron: '30 21 * * 1-5'   # 21:30 UTC weekdays (~4:30pm ET in summer, 4:30pm ET in winter)
-  workflow_dispatch: {}        # also gives you a manual "Run" button in the Actions tab
+    - cron: '47 21 * * 1-5'
+  workflow_dispatch: {}        # manual "Run" button (safe: bot is idempotent per day)
+
+# Same group as rotation.yml: the two bots share one Alpaca account and must never
+# run at the same time (on 2026-07-01 they started 3 seconds apart and raced).
+concurrency:
+  group: alpaca-account
+  cancel-in-progress: false
+
+permissions:
+  contents: write              # journal commit-back (also keeps the repo "active" so
+                               # GitHub never auto-disables these schedules at 60 idle days)
 
 jobs:
   trade:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          node-version: '20'
+          ref: main            # journal commits land on main; run against its tip
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
       - name: Run the bot
         env:
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          # Variables below are optional — set them in repo Settings > Variables to override defaults.
-          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}            # 'true' = log only (safe). Set 'false' to actually trade paper.
-          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM,VTI,MDY,XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC,SMH,SOXX,XBI,KRE,ITB,XOP,GDX,EEM,EFA,FXI,EWZ,TLT,IEF,HYG,GLD,SLV' }} # 33 liquid ETFs across asset classes — more markets = dips fire more often
-          ALLOC_PCT: ${{ vars.ALLOC_PCT || '15' }}          # % of paper equity per position
-          MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '6' }}   # max concurrent holdings (raised for the wider universe)
-          KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}   # set 'true' to halt all trading
-          STOP_PCT: ${{ vars.STOP_PCT || '7' }}             # hard stop-loss %: exit if a position falls this far below entry (crash protection)
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}   # optional: order + failure alerts
+          # Variables below are optional — set them in repo Settings > Variables to override.
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}            # 'true' = log only. 'false' = place paper orders.
+          DRY_RUN_RSI: ${{ vars.DRY_RUN_RSI || '' }}        # per-bot override of DRY_RUN
+          KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}   # halt both bots
+          KILL_SWITCH_RSI: ${{ vars.KILL_SWITCH_RSI || '' }}
+          # 22 ETFs; the 11 XL* sector ETFs now belong EXCLUSIVELY to the rotation bot —
+          # overlapping universes made the two bots sell each other's positions (Jun-Aug 2026).
+          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM,VTI,MDY,SMH,SOXX,XBI,KRE,ITB,XOP,GDX,EEM,EFA,FXI,EWZ,TLT,IEF,HYG,GLD,SLV' }}
+          SECTORS: ${{ vars.SECTORS || 'XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC' }} # rotation bot's turf (for the overlap guard)
+          ALLOC_PCT: ${{ vars.ALLOC_PCT || '15' }}          # % of equity per position (vol-scaled ±50%, capped by cash)
+          MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '6' }}
+          MAX_PER_CLUSTER: ${{ vars.MAX_PER_CLUSTER || '2' }} # max positions per correlation cluster
+          STOP_PCT: ${{ vars.STOP_PCT || '15' }}            # CATASTROPHE stop (server-side GTC). Widened from 7:
+                                                            # tight stops hurt mean-reversion expectancy (Connors/Alvarez)
+                                                            # and a resting 7% stop would sell normal dip noise intraday.
+          TIME_STOP_DAYS: ${{ vars.TIME_STOP_DAYS || '10' }} # exit stale positions after N sessions (0 = off)
+          SPY_MAX_RSI2: ${{ vars.SPY_MAX_RSI2 || '100' }}   # regime gate: only buy dips when SPY RSI-2 below this (100 = off)
+          MAX_DRAWDOWN_PCT: ${{ vars.MAX_DRAWDOWN_PCT || '12' }} # circuit breaker: halt buys at this drawdown from peak
+          CIRCUIT_RESET: ${{ vars.CIRCUIT_RESET || 'false' }}
+          ENTRY_MODE: ${{ vars.ENTRY_MODE || 'market' }}    # 'limit' = limit at signal close (less open-auction slippage)
+          EXIT_MODE: ${{ vars.EXIT_MODE || 'rsi' }}         # 'sma5' = Connors' published close>5SMA exit
         run: node bot.mjs
+      - name: Commit journal
+        if: always()
+        run: |
+          git config user.name "trade-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add journal/
+          git diff --cached --quiet && exit 0
+          git commit -m "journal: $(date -u +%F) run ${GITHUB_RUN_ID} [skip ci]"
+          git pull --rebase origin main
+          git push
+      - name: Discord alert on failure
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && exit 0
+          printf '{"content":"🚨 **RSI-2 bot workflow FAILED** — run %s"}' "${{ github.run_id }}" \
+            | curl -sf -H 'Content-Type: application/json' -d @- "$WEBHOOK" || true

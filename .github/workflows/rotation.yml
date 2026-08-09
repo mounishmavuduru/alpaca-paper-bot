@@ -1,24 +1,62 @@
 name: Sector Rotation Bot
-# Monthly rotation into the top-3 momentum sectors. Runs once a month, in the cloud.
+# Monthly: 1st of the month, 22:17 UTC — 30 min after the RSI bot's slot, an uncommon
+# minute, and serialized with it via the shared concurrency group (they raced within
+# 3 seconds on 2026-07-01). Weekend 1sts are fine: Friday's close is a valid monthly
+# signal and queued orders fill at the next open, idempotently.
 on:
   schedule:
-    - cron: '30 21 1 * *'   # 1st of each month, 21:30 UTC (orders queue to next open if market closed)
-  workflow_dispatch: {}      # manual "Run" button
+    - cron: '17 22 1 * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: alpaca-account
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   rotate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          node-version: '20'
+          ref: main
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
       - name: Run rotation bot
         env:
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+          DRY_RUN_ROT: ${{ vars.DRY_RUN_ROT || '' }}
           KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}
+          KILL_SWITCH_ROT: ${{ vars.KILL_SWITCH_ROT || '' }}
           SECTORS: ${{ vars.SECTORS || 'XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC' }}
+          SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM,VTI,MDY,SMH,SOXX,XBI,KRE,ITB,XOP,GDX,EEM,EFA,FXI,EWZ,TLT,IEF,HYG,GLD,SLV' }} # RSI bot's turf (for the overlap guard)
           TOP_N: ${{ vars.TOP_N || '3' }}
+          MOM_SKIP: ${{ vars.MOM_SKIP || '21' }}            # 21 = academic 12-1 momentum (skip the mean-reverting last month)
+          MOM_BLEND: ${{ vars.MOM_BLEND || 'false' }}       # 'true' = rank on mean of 3m/6m/12-1m momentum
+          ROT_ALLOC_PCT: ${{ vars.ROT_ALLOC_PCT || '90' }}  # % of equity the rotation sleeve may deploy
         run: node rotation_bot.mjs
+      - name: Commit journal
+        if: always()
+        run: |
+          git config user.name "trade-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add journal/
+          git diff --cached --quiet && exit 0
+          git commit -m "journal: rotation $(date -u +%F) run ${GITHUB_RUN_ID} [skip ci]"
+          git pull --rebase origin main
+          git push
+      - name: Discord alert on failure
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && exit 0
+          printf '{"content":"🚨 **Rotation bot workflow FAILED** — run %s"}' "${{ github.run_id }}" \
+            | curl -sf -H 'Content-Type: application/json' -d @- "$WEBHOOK" || true
