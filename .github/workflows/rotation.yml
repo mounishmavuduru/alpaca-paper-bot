@@ -57,6 +57,9 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "journal: rotation $(date -u +%F) run ${GITHUB_RUN_ID} [skip ci]"
           for i in 1 2 3; do
+            # A failed rebase leaves .git/rebase-merge behind, which makes every later
+            # attempt fail instantly with "a rebase is already in progress".
+            git rebase --abort 2>/dev/null || true
             git pull --rebase origin main && git push && exit 0
             sleep 3
           done

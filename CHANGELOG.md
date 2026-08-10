@@ -38,9 +38,11 @@ Every numbered item below was **observed live**, not theoretical.
 - Open-order awareness + per-day `client_order_id` idempotency (fixes 1, 3).
 - Disjoint universes enforced at startup; rotation touches only its SECTORS (fixes 2).
 - Cash-budgeted sizing; rotation buys funded by cash + haircut sale proceeds (fixes 1, 7).
-- Server-side GTC catastrophe stops on every position, reconciled daily; exits cancel the
-  stop first (fixes 3, 6); stop default widened 7%→15% per Connors/Alvarez evidence that
-  tight stops damage mean-reversion expectancy.
+- Server-side GTC catastrophe stops on every RSI-2 position, reconciled daily; exits cancel
+  the stop first (fixes 3, 6); stop default widened 7%→15% per Connors/Alvarez evidence that
+  tight stops damage mean-reversion expectancy. (The rotation sleeve deliberately carries no
+  per-position stop — a monthly momentum sleeve is not stopped out intra-month; its backstop
+  is the rebalance plus the account-level circuit breaker.)
 - Dividend-adjusted bars: Alpaca Market Data (SIP, `adjustment=all`) primary, Yahoo
   `adjclose` fallback, retries + freshness validation (fixes 4).
 - Fail-closed everywhere: held-symbol data failure = red run + alert + broker-P&L stop
@@ -55,7 +57,7 @@ Every numbered item below was **observed live**, not theoretical.
   actions, minimal permissions, `timeout-minutes`, Node 24, committed JSONL journal (also
   the 60-day-disable keepalive), Discord alerts + failure steps, async-rejection
   reconciliation (accepted-then-rejected orders surface next run).
-- 42 tests: indicator golden values, config + circuit-breaker units, and 29 end-to-end
+- 46 tests: indicator golden values, config + circuit-breaker units, and 33 end-to-end
   scenarios running the real bots against a mock Alpaca broker — including regression tests
   for incidents 1, 2, 3, and 5 above.
 - A watchdog in the daily bot alerts (and fails the run) if no rotation run was journaled by

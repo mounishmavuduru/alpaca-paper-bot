@@ -22,8 +22,8 @@ to overlap — on a shared account, overlapping strategies liquidate each other.
 |---|---|
 | No duplicate orders, ever | open-order awareness + deterministic `client_order_id` per (bot, side, symbol, day) — Alpaca rejects replays server-side |
 | No hidden leverage | buys spend a tracked cash budget (pending orders deducted), never raw equity |
-| Crash protection survives bot death | GTC stop order at the broker for every position (default 15% — a *catastrophe* stop; tight stops provably hurt mean-reversion) |
-| Data failures fail **closed** | dividend-adjusted bars from Alpaca (SIP) with Yahoo fallback and retries; a held symbol with no data = red run + alert + broker-P&L stop check, never a silent skip |
+| Crash protection survives bot death | GTC stop at the broker for every **RSI-2** position (default 15% — a *catastrophe* stop; tight stops provably hurt mean-reversion). **Rotation-sleeve positions carry no broker-side stop** — that sleeve's backstop is the monthly rebalance plus the account-level circuit breaker |
+| Data failures fail **closed** | dividend-adjusted bars from Alpaca (SIP) with Yahoo fallback and retries; a held symbol with no data is alerted, never silently skipped (the RSI-2 bot also fails the run and still checks its stop from broker P&L) |
 | One strategy per symbol | disjoint universes enforced at startup; rotation only ever touches its own SECTORS |
 | Bots never run concurrently | shared `concurrency` group across both workflows |
 | Drawdown circuit breaker | buys halt at 12% below peak equity (exits unaffected); re-arm with `CIRCUIT_RESET=true` |
@@ -41,9 +41,12 @@ to overlap — on a shared account, overlapping strategies liquidate each other.
 3. **It starts in DRY-RUN.** Watch a few runs in the Actions tab, then set repo **Variable**
    `DRY_RUN` = `false` to trade paper for real.
 
-Manual run any time: Actions tab → pick a workflow → "Run workflow". Safe to spam — runs
-are idempotent per day, and intraday manual runs force DRY-RUN (daily signals need a
-completed bar; override with `ALLOW_INTRADAY=true` if you know what you're doing).
+Manual run any time: Actions tab → pick a workflow → "Run workflow". Orders are idempotent
+per day, so a re-run cannot double-buy, and an intraday manual run forces DRY-RUN (daily
+signals need a completed bar; override with `ALLOW_INTRADAY=true` if you know what you're
+doing). One caveat: both workflows share a concurrency group, which holds at most one
+running plus one queued run — so dispatching while a run is in progress *and* another is
+already queued evicts the queued one. Prefer waiting for the in-flight run to finish.
 
 ## Config (repo Variables; all optional)
 
@@ -83,8 +86,8 @@ keeps the schedules alive. `journal/state.json` carries the circuit-breaker peak
 ## Development
 
 ```bash
-npm test          # 42 tests: indicator golden values, config + circuit-breaker units, and
-                  # 29 end-to-end scenarios running the real bots against a mock Alpaca broker
+npm test          # 46 tests: indicator golden values, config + circuit-breaker units, and
+                  # 33 end-to-end scenarios running the real bots against a mock Alpaca broker
 npm run trade     # run the RSI-2 bot locally (needs ALPACA_KEY/SECRET; DRY_RUN defaults true)
 npm run rotate    # run the rotation bot locally
 ```
@@ -101,8 +104,15 @@ journal commit-back).
   pre-close execution mode (~3:50pm ET) would recover more but trades on a partial bar.
 - New entries are unprotected from fill (next open) until that evening's run places the GTC
   stop — an hours-long gap, accepted to keep entries simple whole-share market orders.
-- The rotation bot has no intra-month exit by design (momentum strategies are held monthly);
-  the account-level circuit breaker is the backstop.
+- The rotation bot has no intra-month exit and no broker-side stop by design (momentum
+  sleeves are held to the rebalance); the monthly rotation and the account-level circuit
+  breaker are its backstops.
+- **The two sleeves share one cash pool.** At the defaults they would each like ~90% of
+  equity, so whichever bot runs first gets the cash and the other is funded with what's
+  left. That can never create leverage — but it can leave the rotation sleeve partly
+  unfunded, which now raises a warning rather than passing silently. If you want both fully
+  funded, size them to sum to ≤100% (e.g. `ALLOC_PCT=8` with `MAX_POSITIONS=6` alongside
+  `ROT_ALLOC_PCT=50`).
 - This repo is public unless you change it: your Actions logs (equity, positions, orders)
   are world-readable. Fine for paper; **make the repo private before ever pointing it at
   real money.**

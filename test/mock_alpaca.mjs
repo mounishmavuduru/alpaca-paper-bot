@@ -69,7 +69,9 @@ export function startMock(state) {
         const id = path.split('/').pop();
         const o = state.orders.find(x => x.id === id);
         if (!o) return send({ message: 'order not found' }, 404);
-        o.status = 'pending_cancel'; // Alpaca cancels are asynchronous
+        // Optional: simulate an order that FILLS in the race between our snapshot and our
+        // cancel — terminal, but the shares are gone rather than freed.
+        o.status = state.fillOnCancel?.includes(id) ? 'filled' : 'pending_cancel';
         return send(null, 204);
       }
 

@@ -77,6 +77,13 @@ async function main() {
   const ordersFor = (sym) => openOrders.filter(o => o.symbol === sym);
   console.log(`My sector positions: ${mine.map(p => p.symbol).join(', ') || '(none)'}`);
 
+  const unmanaged = positions.filter(p => !SECTORS.includes(p.symbol) && !SYMBOLS.includes(p.symbol));
+  if (unmanaged.length) {
+    await alert('error', `UNMANAGED position(s): ${unmanaged.map(p => p.symbol).join(', ')}`,
+      'In neither bot\'s universe: no exits, no stop-loss reconciliation, ever. Close them manually or add the symbol back to SYMBOLS/SECTORS.');
+    process.exitCode = 1;
+  }
+
   // Surface async order failures since the LAST monthly run (accepted → rejected at open);
   // a short window here would mean a rejection on the 2nd is never seen by a monthly bot.
   try {
@@ -84,6 +91,7 @@ async function main() {
     for (const o of closed.filter(o => o.client_order_id?.startsWith('rot-') && ['rejected', 'expired'].includes(o.status))) {
       await alert('error', `Rotation order ${o.status} after acceptance: ${o.side} ${o.qty} ${o.symbol}`,
         `client_order_id=${o.client_order_id} — the rotation may be incomplete; re-run via workflow_dispatch after checking.`);
+      process.exitCode = 1;
     }
   } catch (e) { journal.incidents.push(`closed-order check: ${e.message}`); }
 
@@ -145,12 +153,18 @@ async function main() {
     const sym = pos.symbol;
     try {
       if (targetSet.has(sym)) { console.log(`${sym} → keep (in target)`); continue; }
-      if (failed.has(sym)) { console.log(`${sym} → data unavailable — HOLDING, not a rotation decision`); continue; }
+      if (failed.has(sym)) {
+        // Held + no data: hold (never sell on a data error) but say so out loud — silence
+        // here would break the "data failures are never a silent skip" guarantee.
+        await alert('warn', `No data for held sector ${sym} — HOLDING (not a rotation decision)`,
+          failures.find(f => f.sym === sym)?.error ?? 'insufficient history');
+        continue;
+      }
       if (ordersFor(sym).some(o => o.side === 'sell' && !['stop', 'stop_limit', 'trailing_stop'].includes(o.type))) { console.log(`${sym} → sell already queued, skip`); continue; }
       for (const o of ordersFor(sym)) {
         if (dryRun) { console.log(`${sym} → WOULD cancel open ${o.type} order first`); continue; }
-        const done = await alpaca.cancelAndWait(o.id);
-        if (!done) throw new Error(`open ${o.type} order ${o.id} still not canceled — not selling ${sym} this run`);
+        const st = await alpaca.cancelAndWait(o.id);
+        if (!alpaca.FREED.has(st)) throw new Error(`open ${o.type} order ${o.id} ended '${st}' — shares not free, not selling ${sym}`);
         console.log(`${sym} → canceled open ${o.type} order ${o.id.slice(0, 8)}…`);
       }
       await place(
@@ -186,7 +200,13 @@ async function main() {
       if (ordersFor(t.s).some(o => o.side === 'buy')) { console.log(`${t.s} → buy already queued, skip`); continue; }
       const notional = Math.min(perSlot, budget);
       const qty = Math.floor(notional / t.price);
-      if (qty < 1) { console.log(`${t.s} → target, but budget $${budget.toFixed(0)} too small → skip`); continue; }
+      if (qty < 1) {
+        // Both sleeves draw on one cash pool, so whichever bot runs first can starve the
+        // other. Silence here would leave the rotation sleeve empty for a month unnoticed.
+        await alert('warn', `Rotation target ${t.s} UNFUNDED — only $${budget.toFixed(0)} cash available`,
+          'The dip-buyer sleeve is holding the cash. Lower ALLOC_PCT/MAX_POSITIONS or ROT_ALLOC_PCT so both sleeves fit in 100% of equity.');
+        continue;
+      }
       const spend = qty * t.price;
       if (!(spend > 0 && spend <= (equity * ROT_ALLOC_PCT) / TOP_N * 1.05)) throw new Error(`sanity: order notional $${spend.toFixed(0)} out of bounds`);
       await place(

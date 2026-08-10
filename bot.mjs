@@ -122,15 +122,30 @@ async function main() {
   const pendingSell = (sym) => ordersFor(sym).some(o => o.side === 'sell' && !stopLike(o));
   const openStop = (sym) => ordersFor(sym).find(o => o.side === 'sell' && stopLike(o));
   console.log(`My positions: ${myPositions.map(p => p.symbol).join(', ') || '(none)'} | open orders: ${openOrders.map(o => `${o.side} ${o.symbol}`).join(', ') || '(none)'}`);
+  // A position outside BOTH universes gets no exits and no stop reconciliation from anyone —
+  // it would sit unmanaged forever. That must be loud on every channel, every day, until it
+  // is closed or re-added to a universe (a job-summary note would go unseen).
   const unmanaged = positions.filter(p => !SYMBOLS.includes(p.symbol) && !SECTORS.includes(p.symbol));
-  if (unmanaged.length) note(`⚠️ positions in NEITHER bot's universe (unmanaged, no exits will ever fire): ${unmanaged.map(p => p.symbol).join(', ')}`);
+  if (unmanaged.length) {
+    await alert('error', `UNMANAGED position(s): ${unmanaged.map(p => p.symbol).join(', ')}`,
+      'In neither bot\'s universe: no exits, no stop-loss reconciliation, ever. Close them manually or add the symbol back to SYMBOLS/SECTORS.');
+    process.exitCode = 1;
+  }
 
   // --- surface async order failures from prior runs (accepted → rejected/expired at open) ---
   try {
     const closed = await alpaca.getClosedOrdersSince(new Date(Date.now() - 2 * 86_400_000).toISOString());
-    for (const o of closed.filter(o => o.client_order_id?.startsWith('rsi-') && ['rejected', 'expired'].includes(o.status))) {
-      await alert('error', `Order ${o.status} after acceptance: ${o.side} ${o.qty ?? o.notional} ${o.symbol}`,
-        `client_order_id=${o.client_order_id} — the position this run's logic assumes may not exist.`);
+    for (const o of closed.filter(o => o.client_order_id?.startsWith('rsi-'))) {
+      if (o.status === 'rejected') {
+        // The broker refused an order we believed was placed — the book is not what this run assumes.
+        await alert('error', `Order REJECTED after acceptance: ${o.side} ${o.qty ?? o.notional} ${o.symbol}`,
+          `client_order_id=${o.client_order_id} — investigate before the next run.`);
+        process.exitCode = 1;
+      } else if (o.status === 'expired' && o.side === 'sell') {
+        // An unfilled DAY buy expiring is normal; an expired SELL means an exit never happened.
+        await alert('warn', `Exit order expired unfilled: ${o.side} ${o.qty} ${o.symbol}`,
+          `client_order_id=${o.client_order_id} — the position is likely still open; this run re-evaluates it.`);
+      }
     }
   } catch (e) { journal.incidents.push(`closed-order check: ${e.message}`); }
 
@@ -177,8 +192,8 @@ async function main() {
   const spyBars = bars.get('SPY');
   const spyRsi2 = spyBars && spyBars.closes.length > 2 ? wilderRSI(spyBars.closes, 2) : null;
   // Fail closed: a CONFIGURED regime gate with missing SPY data blocks buys (v1 silently disengaged it).
-  const regimeBlocked = SPY_MAX_RSI2 < 100 && spyRsi2 == null;
-  if (regimeBlocked) await alert('warn', 'SPY regime data unavailable — blocking all buys this run (gate is configured)');
+  const regimeBlocked = SPY_MAX_RSI2 < 100 && (spyRsi2 == null || !isFresh(spyBars, expected));
+  if (regimeBlocked) await alert('warn', 'SPY regime data missing or stale — blocking all buys this run (gate is configured)');
   console.log(`Market regime: SPY RSI-2 = ${spyRsi2 == null ? 'n/a' : spyRsi2.toFixed(0)} | data as of ${expected}\n`);
 
   // --- cash budget: cash minus what queued buys will consume (sell proceeds not counted).
@@ -204,8 +219,11 @@ async function main() {
   const place = async (order, describe) => {
     if (dryRun) { console.log(`   → WOULD ${describe}`); return { placed: false, dry: true }; }
     const res = await alpaca.placeOrder(order);
+    // A duplicate still means the order EXISTS at the broker, so it must be journaled —
+    // otherwise the time stop later reads a stale entry date for this position.
+    journal.orders.push(order);
     if (res.duplicate) console.log(`   → already placed today (client_order_id dedupe): ${describe}`);
-    else { console.log(`   → ${describe} ✅`); journal.orders.push(order); await alert('order', describe); }
+    else { console.log(`   → ${describe} ✅`); await alert('order', describe); }
     return res;
   };
 
@@ -228,7 +246,11 @@ async function main() {
           // Fail closed: no market data, but the broker's own P&L still lets us enforce the catastrophe stop.
           if (Number.isFinite(brokerLossPct) && brokerLossPct <= -STOP_PCT) {
             const stop = openStop(sym);
-            if (stop && !dryRun) { await alpaca.cancelAndWait(stop.id); canceledStops.add(sym); }
+            if (stop && !dryRun) {
+              const st = await alpaca.cancelAndWait(stop.id);
+              canceledStops.add(sym);
+              if (!alpaca.FREED.has(st)) throw new Error(`stop ${stop.id} ended '${st}' — shares not free, not selling ${sym}`);
+            }
             await place(
               { symbol: sym, qty: pos.qty, side: 'sell', type: 'market', time_in_force: 'day', client_order_id: `rsi-sell-${sym}-${today}` },
               `SELL ${pos.qty} ${sym} @ market (hard stop ${(brokerLossPct * 100).toFixed(1)}% — broker P&L, no market data)`,
@@ -282,9 +304,10 @@ async function main() {
         // (the 2026-08-01 crash), and Alpaca cancels are asynchronous.
         const stop = openStop(sym);
         if (stop && !dryRun) {
-          const done = await alpaca.cancelAndWait(stop.id);
+          const st = await alpaca.cancelAndWait(stop.id);
           canceledStops.add(sym);
-          if (!done) throw new Error(`stop ${stop.id} still not canceled — not selling ${sym} this run`);
+          // 'filled' here means the stop already sold the position — selling again would short it.
+          if (!alpaca.FREED.has(st)) throw new Error(`stop ${stop.id} ended '${st}' — shares not free, not selling ${sym}`);
           console.log(`${tag} → canceled catastrophe stop ${stop.id.slice(0, 8)}…`);
         }
         await place(
@@ -315,8 +338,11 @@ async function main() {
         `place GTC catastrophe stop: SELL ${wholeQty} ${sym} @ stop $${stopPrice}`,
       );
     } catch (e) {
+      // A position ending the run with neither an exit nor a resting stop is exactly what
+      // STOP_PCT exists to prevent — that has to fail the run, not warn on a green one.
       journal.incidents.push(`stop ${sym}: ${e.message}`);
-      await alert('warn', `Could not place protective stop for ${sym}`, e.message);
+      await alert('error', `UNPROTECTED: could not place catastrophe stop for ${sym}`, e.message);
+      process.exitCode = 1;
     }
   }
 

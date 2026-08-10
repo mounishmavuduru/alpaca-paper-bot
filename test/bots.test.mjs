@@ -86,8 +86,11 @@ test('REGRESSION Jun 18-19: pending queued buy → no duplicate buy on re-run', 
 test('dead duplicate client_order_id (rejected earlier today) → retried under -r suffix', async () => {
   const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() } });
   state.orders.push({ id: 'dead_1', symbol: 'SPY', side: 'buy', type: 'market', qty: '10', status: 'rejected', client_order_id: 'rsi-buy-SPY-2026-08-07' });
-  const { code, state: s } = await runBot('bot.mjs', state);
-  assert.equal(code, 0);
+  const { code, state: s, stdout } = await runBot('bot.mjs', state);
+  // The earlier rejection is itself reported and reddens the run — but the wanted order
+  // must still be placed rather than swallowed by the duplicate-id check.
+  assert.equal(code, 1);
+  assert.match(stdout, /Order REJECTED after acceptance/);
   const buys = placed(s).filter(o => o.side === 'buy');
   assert.equal(buys.length, 1, 'the wanted buy must not be silently dropped');
   assert.equal(buys[0].client_order_id, 'rsi-buy-SPY-2026-08-07-r');
@@ -199,6 +202,50 @@ test('FAIL-CLOSED: no data for held symbol, small loss → no sell, loud red run
   assert.equal(placed(s).filter(o => o.side === 'sell' && o.type === 'market').length, 0);
   assert.equal(placed(s).filter(o => o.type === 'stop').length, 1, 'catastrophe stop still placed');
   assert.match(stdout, /No usable data for HELD SPY/);
+});
+
+test('a position outside BOTH universes is a red run + alert, not a quiet note', async () => {
+  const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() } });
+  state.positions.push({ symbol: 'ARKK', qty: '50', avg_entry_price: '60', unrealized_pl: '0', unrealized_plpc: '0.0' });
+  const { code, state: s, stdout } = await runBot('bot.mjs', state);
+  assert.equal(code, 1, 'an unmanaged position must fail the run every day until it is dealt with');
+  assert.match(stdout, /UNMANAGED position\(s\): ARKK/);
+  assert.equal(placed(s).filter(o => o.symbol === 'ARKK').length, 0, 'and the bot must not trade it');
+});
+
+test('a stop that FILLED during cancellation must not trigger a second sell (would short)', async () => {
+  const state = defaultState({ bars: { SPY: bounceSeries(), TLT: holdSeries() } });
+  state.positions.push({ symbol: 'SPY', qty: '100', avg_entry_price: '120', unrealized_pl: '500', unrealized_plpc: '0.04' });
+  // The resting stop is open at snapshot time but FILLS in the race before our cancel lands.
+  state.orders.push({ id: 'stop_1', symbol: 'SPY', side: 'sell', type: 'stop', qty: '100', status: 'new', stop_price: '102' });
+  state.fillOnCancel = ['stop_1'];
+  const { code, state: s } = await runBot('bot.mjs', state);
+  assert.equal(code, 1, 'must fail loudly rather than sell shares it no longer owns');
+  assert.equal(placed(s).filter(o => o.side === 'sell' && o.type === 'market').length, 0, 'no second sell');
+});
+
+test('failing to place a catastrophe stop fails the run (position would be unprotected)', async () => {
+  const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() } });
+  state.positions.push({ symbol: 'SPY', qty: '100', avg_entry_price: '130', unrealized_pl: '0', unrealized_plpc: '0.0' });
+  state.rejectOrders = [{ symbol: 'SPY', side: 'sell', type: 'stop', status: 403, message: 'nope' }];
+  const { code, stdout } = await runBot('bot.mjs', state);
+  assert.equal(code, 1);
+  assert.match(stdout, /UNPROTECTED/);
+});
+
+test('time stop ignores a stale entry date when the journal last saw the symbol SOLD', async () => {
+  const journalDir = mkdtempSync(join(tmpdir(), 'bot-journal-'));
+  writeFileSync(join(journalDir, 'journal.jsonl'),
+    // an old round trip, then 30 sessions with no record of the CURRENT position opening
+    JSON.stringify({ bot: 'rsi2', date_et: '2026-05-04', session: true, orders: [{ symbol: 'SPY', side: 'buy' }] }) + '\n' +
+    JSON.stringify({ bot: 'rsi2', date_et: '2026-05-11', session: true, orders: [{ symbol: 'SPY', side: 'sell' }] }) + '\n' +
+    Array.from({ length: 30 }, (_, i) => JSON.stringify({ bot: 'rsi2', date_et: `2026-06-${String(i + 1).padStart(2, '0')}`, session: true, orders: [] })).join('\n') + '\n');
+  const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() } });
+  state.positions.push({ symbol: 'SPY', qty: '100', avg_entry_price: '130', unrealized_pl: '0', unrealized_plpc: '0.0' });
+  const { state: s, stdout } = await runBot('bot.mjs', state, { JOURNAL_DIR: journalDir, TIME_STOP_DAYS: '10' });
+  assert.equal(placed(s).filter(o => o.side === 'sell' && o.type === 'market').length, 0,
+    'a fresh position must not be liquidated because an OLD buy of the same symbol is in the journal');
+  assert.doesNotMatch(stdout, /time stop/);
 });
 
 test('circuit breaker: drawdown past limit blocks buys but never exits', async () => {
@@ -331,7 +378,7 @@ test('rotation FAIL-CLOSED: held sector with missing data is HELD, not sold as "
   const { code, state: s, stdout } = await runBot('rotation_bot.mjs', state);
   assert.equal(code, 0);
   assert.equal(placed(s).filter(o => o.side === 'sell').length, 0, 'data failure must never trigger a sell');
-  assert.match(stdout, /data unavailable — HOLDING/);
+  assert.match(stdout, /No data for held sector XLF — HOLDING/);
 });
 
 test('rotation aborts entirely when ranking would be meaningless (mass data failure)', async () => {
