@@ -47,22 +47,32 @@ completed bar; override with `ALLOW_INTRADAY=true` if you know what you're doing
 
 ## Config (repo Variables; all optional)
 
-**Shared:** `DRY_RUN` (true), `KILL_SWITCH` (false) — plus per-bot overrides
+**Shared (both bots):** `DRY_RUN` (true), `KILL_SWITCH` (false) — plus per-bot overrides
 `DRY_RUN_RSI` / `DRY_RUN_ROT` / `KILL_SWITCH_RSI` / `KILL_SWITCH_ROT` so you can pause one
-strategy without the other.
+strategy without the other. Also account-level, so they govern **both** bots:
+`MAX_DRAWDOWN_PCT` (12 — drawdown from peak equity that halts new buys), `CIRCUIT_RESET`
+(false — set true to re-arm a tripped breaker, then remove it), `DATA_FEED` (sip | iex),
+`ALLOW_INTRADAY` (false — daily signals need a completed bar, so a run during market hours
+forces dry-run unless you set this).
 
 **RSI-2 bot:** `SYMBOLS` (22 ETFs), `ALLOC_PCT` (15), `MAX_POSITIONS` (6),
 `MAX_PER_CLUSTER` (2 — max positions per correlation cluster, so six index-fund dips can't
 become one 90% beta bet), `STOP_PCT` (15), `TIME_STOP_DAYS` (10), `SPY_MAX_RSI2` (100 = off;
-try 50 to buy dips only when the whole market is weak), `MAX_DRAWDOWN_PCT` (12),
-`ENTRY_MODE` (market | `limit` = limit at signal close, cuts open-auction slippage at the
-cost of missing gap-up entries), `EXIT_MODE` (rsi | `sma5` = Connors' published exit),
-`BUY_RSI2` (5), `SELL_RSI2` (65), `RISK_SCALING` (true — position size scales inversely
-with 20-day volatility, ±50%), `CIRCUIT_RESET` (false).
+try 50 to buy dips only when the whole market is weak), `ENTRY_MODE` (market | `limit` =
+limit at signal close, cuts open-auction slippage at the cost of missing gap-up entries),
+`EXIT_MODE` (rsi | `sma5` = Connors' published exit), `BUY_RSI2` (5), `SELL_RSI2` (65),
+`TREND_BUFFER_PCT` (3 — how far below the 200-SMA counts as a trend break), `RISK_SCALING`
+(true — position size scales inversely with 20-day volatility, ±50%), `VOL_TARGET` (20 —
+the annualized volatility that scaling targets), `MIN_ORDER_USD` (500), `ORDER_CAP` (10 —
+max buys per run), `FORCE_RUN` (false — run even when the exchange calendar says today is
+not a trading day; the guard that prevents holiday double-buys, so leave it off).
 
 **Rotation bot:** `SECTORS` (11 SPDRs), `TOP_N` (3), `MOM_SKIP` (21 — trading days skipped
 for 12-1 momentum; 0 restores v1's 12-0), `MOM_BLEND` (false — rank on mean of 3m/6m/12-1m),
 `ROT_ALLOC_PCT` (90).
+
+**Expert:** `ALLOW_UNIVERSE_OVERLAP` (false). Setting it true lets both bots manage the same
+symbol — the single worst v1 bug. Don't.
 
 ## Journal
 
@@ -73,8 +83,8 @@ keeps the schedules alive. `journal/state.json` carries the circuit-breaker peak
 ## Development
 
 ```bash
-npm test          # 31 tests: indicator golden values, config validation, and 21 end-to-end
-                  # scenarios running the real bots against a mock Alpaca server
+npm test          # 41 tests: indicator golden values, config + circuit-breaker units, and
+                  # 28 end-to-end scenarios running the real bots against a mock Alpaca broker
 npm run trade     # run the RSI-2 bot locally (needs ALPACA_KEY/SECRET; DRY_RUN defaults true)
 npm run rotate    # run the rotation bot locally
 ```
@@ -99,8 +109,11 @@ journal commit-back).
 
 ## 🚨 Going to REAL money later
 
-The code requires a deliberate two-key turn: the live endpoint refuses to start without
-`I_UNDERSTAND_LIVE=yes`. Before even considering it: months of clean paper runs, the
-Discord feed wired and read daily, the repo private, and money you can afford to lose.
+The code requires a deliberate two-key turn, and deliberately **cannot** be flipped from the
+repo Variables UI: you must edit both workflow files to pass `ALPACA_BASE` (the live
+endpoint) and `I_UNDERSTAND_LIVE=yes`, and swap in live keys. Without that env var the
+client refuses to start against a live endpoint. Before even considering it: months of clean
+paper runs, the Discord feed wired and read daily, the repo private, and money you can
+afford to lose.
 **Honest reminder:** this system's edge is discipline and lower drawdowns, not riches —
 keep the bulk in boring index funds.

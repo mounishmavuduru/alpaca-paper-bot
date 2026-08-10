@@ -38,11 +38,16 @@ async function runBot(script, state, extraEnv = {}) {
         JOURNAL_DIR: journalDir,
       },
     });
-    let out = '';
+    let out = '', timedOut = false;
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
-    const timer = setTimeout(() => child.kill(), 60_000);
-    child.on('close', (code) => { clearTimeout(timer); resolve({ stdout: out, code: code ?? 1 }); });
+    // Generous, and reported explicitly: a killed child otherwise surfaces as a baffling
+    // assertion diff ("expected 1 stop, got 0") instead of "the bot never finished".
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 120_000);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout: out + (timedOut ? '\n[HARNESS TIMEOUT: child killed after 120s]' : ''), code: timedOut ? 'TIMEOUT' : (code ?? 1) });
+    });
   });
   srv.closeAllConnections?.();
   srv.close();
@@ -203,6 +208,29 @@ test('overlapping universes → hard startup failure, zero orders', async () => 
   assert.match(stdout, /overlap/);
 });
 
+test('STALE data blocks new entries (exits still evaluate)', async () => {
+  // bars end 2026-08-06 while the exchange calendar says today is 2026-08-07
+  const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() }, barDate: '2026-08-06' });
+  const { code, state: s, stdout } = await runBot('bot.mjs', state);
+  assert.equal(code, 0);
+  assert.equal(placed(s).filter(o => o.side === 'buy').length, 0, 'never open a position on stale prices');
+  assert.match(stdout, /BUY signal on STALE data/);
+});
+
+test('garbage DATA_FEED hard-fails instead of silently degrading the price source', async () => {
+  const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() } });
+  const { code, state: s } = await runBot('bot.mjs', state, { DATA_FEED: 'siip' });
+  assert.equal(code, 1);
+  assert.equal(placed(s).length, 0);
+});
+
+test('ALLOW_UNIVERSE_OVERLAP escape hatch is actually reachable from the environment', async () => {
+  const state = defaultState({ bars: { SPY: holdSeries(), XLK: holdSeries() } });
+  const { code, stdout } = await runBot('bot.mjs', state, { SYMBOLS: 'SPY,XLK', ALLOW_UNIVERSE_OVERLAP: 'true' });
+  assert.equal(code, 0, 'the documented override must work');
+  assert.match(stdout, /run complete/);
+});
+
 test('KILL_SWITCH: any truthy spelling halts (v1 required exact lowercase "true")', async () => {
   const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() } });
   const { code, state: s, stdout } = await runBot('bot.mjs', state, { KILL_SWITCH: ' TRUE ' });
@@ -319,16 +347,20 @@ test('rotation sizing: buys capped by cash + haircut sale proceeds, never raw eq
   assert.ok(spent <= proceeds + 1, `spent $${spent.toFixed(0)} exceeds cash+proceeds $${proceeds.toFixed(0)}`);
 });
 
-test('rotation 12-1 momentum ranks on the skip-month series (off-by-none check)', async () => {
-  // Construct a sector whose LAST month is a crash but prior 11 months are the strongest:
-  // 12-1 momentum should still rank it #1 (12-0 would not).
+test('rotation ranks on 12-1 momentum, not 12-0 (the skip month must actually be skipped)', async () => {
+  // XLU is built so the two definitions DISAGREE: over the 12-1 window (ending 21 bars
+  // back) it is up 50% — the strongest sector — but its final month crashes, so on 12-0 it
+  // is up only 5%, behind XLV, and would drop out of the top 3. Asserting XLU is targeted
+  // therefore fails if MOM_SKIP is ignored. Indices: len=300, so the momentum anchor is
+  // c[47], the 12-1 endpoint is c[278], and the 12-0 endpoint is c[299].
   const bars = sectorBars();
-  const c = [100];
-  for (let i = 1; i < 279; i++) c.push(c[i - 1] * 1.003);   // very strong for 279 days
-  for (let i = 0; i < 21; i++) c.push(c[c.length - 1] * 0.999); // flat-to-down final month
+  const c = [];
+  for (let i = 0; i <= 47; i++) c.push(100);                                  // anchor = 100
+  for (let i = 48; i <= 278; i++) c.push(100 * (1.5 ** ((i - 47) / 231)));    // → 150 (12-1: +50%)
+  for (let i = 279; i <= 299; i++) c.push(150 * ((105 / 150) ** ((i - 278) / 21))); // → 105 (12-0: +5%)
   bars.XLU = c.map(x => Math.round(x * 1000) / 1000);
   const state = defaultState({ bars });
   const { code, stdout } = await runBot('rotation_bot.mjs', state);
   assert.equal(code, 0);
-  assert.match(stdout, /Target \(top 3.*XLU/, 'XLU must be in target on 12-1 momentum');
+  assert.match(stdout, /Target \(top 3[^\n]*XLU/, 'XLU must be targeted — it is #1 on 12-1 momentum');
 });

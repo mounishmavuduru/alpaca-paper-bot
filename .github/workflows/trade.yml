@@ -42,6 +42,7 @@ jobs:
           # overlapping universes made the two bots sell each other's positions (Jun-Aug 2026).
           SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM,VTI,MDY,SMH,SOXX,XBI,KRE,ITB,XOP,GDX,EEM,EFA,FXI,EWZ,TLT,IEF,HYG,GLD,SLV' }}
           SECTORS: ${{ vars.SECTORS || 'XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC' }} # rotation bot's turf (for the overlap guard)
+          ALLOW_UNIVERSE_OVERLAP: ${{ vars.ALLOW_UNIVERSE_OVERLAP || 'false' }} # expert override: let the two bots share symbols (v1's worst bug)
           ALLOC_PCT: ${{ vars.ALLOC_PCT || '15' }}          # % of equity per position (vol-scaled ±50%, capped by cash)
           MAX_POSITIONS: ${{ vars.MAX_POSITIONS || '6' }}
           MAX_PER_CLUSTER: ${{ vars.MAX_PER_CLUSTER || '2' }} # max positions per correlation cluster

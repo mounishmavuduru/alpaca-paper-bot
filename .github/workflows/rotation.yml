@@ -37,6 +37,7 @@ jobs:
           KILL_SWITCH_ROT: ${{ vars.KILL_SWITCH_ROT || '' }}
           SECTORS: ${{ vars.SECTORS || 'XLK,XLF,XLE,XLV,XLY,XLI,XLP,XLU,XLB,XLRE,XLC' }}
           SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,DIA,IWM,VTI,MDY,SMH,SOXX,XBI,KRE,ITB,XOP,GDX,EEM,EFA,FXI,EWZ,TLT,IEF,HYG,GLD,SLV' }} # RSI bot's turf (for the overlap guard)
+          ALLOW_UNIVERSE_OVERLAP: ${{ vars.ALLOW_UNIVERSE_OVERLAP || 'false' }} # expert override: let the two bots share symbols (v1's worst bug)
           TOP_N: ${{ vars.TOP_N || '3' }}
           MOM_SKIP: ${{ vars.MOM_SKIP || '21' }}            # 21 = academic 12-1 momentum (skip the mean-reverting last month)
           MOM_BLEND: ${{ vars.MOM_BLEND || 'false' }}       # 'true' = rank on mean of 3m/6m/12-1m momentum

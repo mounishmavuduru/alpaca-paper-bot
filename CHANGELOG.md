@@ -55,6 +55,8 @@ Every numbered item below was **observed live**, not theoretical.
   actions, minimal permissions, `timeout-minutes`, Node 24, committed JSONL journal (also
   the 60-day-disable keepalive), Discord alerts + failure steps, async-rejection
   reconciliation (accepted-then-rejected orders surface next run).
-- 31 tests: indicator golden values, config validation, and 21 end-to-end scenarios running
-  the real bots against a mock Alpaca server — including regression tests for incidents
-  1, 2, 3, and 5 above.
+- 41 tests: indicator golden values, config + circuit-breaker units, and 28 end-to-end
+  scenarios running the real bots against a mock Alpaca broker — including regression tests
+  for incidents 1, 2, 3, and 5 above.
+- A watchdog in the daily bot alerts (and fails the run) if no rotation run was journaled by
+  the 2nd–5th of a month, so incident 3 cannot silently repeat.

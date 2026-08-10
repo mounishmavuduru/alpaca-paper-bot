@@ -40,7 +40,7 @@ const journal = { ts: new Date().toISOString(), bot: 'rotation', dry_run: DRY_RU
 
 async function main() {
   console.log(`=== Rotation bot ${DRY_RUN ? '[DRY RUN — placing nothing]' : '[LIVE PAPER]'} ${journal.ts} ===`);
-  if (KILL) { console.log('KILL_SWITCH=true — exiting without trading.'); return; }
+  if (KILL) { console.log(`${process.env.KILL_SWITCH_ROT?.trim() ? 'KILL_SWITCH_ROT' : 'KILL_SWITCH'}=true — exiting without trading.`); return; }
   assertDisjoint('SECTORS', SECTORS, 'SYMBOLS', SYMBOLS);
 
   const { date: today, is_open } = await alpaca.todayET();
@@ -60,6 +60,11 @@ async function main() {
   const cash = Number(acct.cash);
   journal.equity = equity; journal.cash = cash;
   console.log(`Account ${acct.status} | equity $${equity.toFixed(0)} | cash $${cash.toFixed(0)}`);
+  if (!Number.isFinite(equity) || !Number.isFinite(cash)) {
+    await alert('error', 'Account equity/cash unreadable — not trading', `equity='${acct.equity}' cash='${acct.cash}'`);
+    process.exitCode = 1;
+    return;
+  }
   if (acct.trading_blocked || acct.account_blocked || acct.status !== 'ACTIVE') {
     await alert('error', 'Account blocked or not ACTIVE — not trading', `status=${acct.status}`);
     process.exitCode = 1;

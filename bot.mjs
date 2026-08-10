@@ -76,7 +76,7 @@ const journal = { ts: new Date().toISOString(), bot: 'rsi2', dry_run: DRY_RUN, o
 
 async function main() {
   console.log(`=== RSI-2 bot ${DRY_RUN ? '[DRY RUN — placing nothing]' : '[LIVE PAPER]'} ${journal.ts} ===`);
-  if (KILL) { console.log('KILL_SWITCH=true — exiting without trading.'); return; }
+  if (KILL) { console.log(`${process.env.KILL_SWITCH_RSI?.trim() ? 'KILL_SWITCH_RSI' : 'KILL_SWITCH'}=true — exiting without trading.`); return; }
   assertDisjoint('SYMBOLS', SYMBOLS, 'SECTORS', SECTORS);
 
   // --- calendar gate: no decisions off stale bars (holiday runs re-bought in v1) ---
@@ -102,6 +102,11 @@ async function main() {
   const cash = Number(acct.cash);
   journal.equity = equity; journal.cash = cash;
   console.log(`Account ${acct.status} | equity $${equity.toFixed(0)} | cash $${cash.toFixed(0)} | base=${alpaca.BASE}`);
+  if (!Number.isFinite(equity) || !Number.isFinite(cash)) {
+    await alert('error', 'Account equity/cash unreadable — not trading', `equity='${acct.equity}' cash='${acct.cash}'`);
+    process.exitCode = 1;
+    return;
+  }
   if (acct.trading_blocked || acct.account_blocked || acct.status !== 'ACTIVE') {
     await alert('error', 'Account blocked or not ACTIVE — not trading', `status=${acct.status}`);
     process.exitCode = 1;
@@ -210,6 +215,7 @@ async function main() {
   const buyCandidates = [];
   const exitedSyms = new Set();     // symbols with a sell placed or already pending
   const canceledStops = new Set();  // stops WE canceled this run (the snapshot won't know)
+  let staleBlockedBuys = 0;
   for (const sym of SYMBOLS) {
     try {
       const rec = bars.get(sym);
@@ -238,7 +244,8 @@ async function main() {
         }
         continue;
       }
-      if (!isFresh(rec, expected)) {
+      const fresh = isFresh(rec, expected);
+      if (!fresh) {
         journal.incidents.push(`stale data: ${sym} last bar ${rec.lastDate} vs ${expected}`);
         if (pos) await alert('warn', `Stale data for held ${sym} (${rec.lastDate}) — exits evaluated on old bar`);
       }
@@ -252,8 +259,11 @@ async function main() {
 
       if (!pos) {
         if (pendingBuy(sym)) { console.log(`${tag} → buy already queued, skip`); continue; }
-        if (last > sma200 && rsi2 < BUY_RSI2) buyCandidates.push({ sym, last, rsi2, closes: c, tag });
-        else console.log(`${tag} → flat, no dip`);
+        if (!(last > sma200 && rsi2 < BUY_RSI2)) { console.log(`${tag} → flat, no dip`); continue; }
+        // Exits may run on a stale bar (better late than never); ENTRIES may not — opening
+        // a position on prices we know are out of date is never the right trade.
+        if (!fresh) { console.log(`${tag} → BUY signal on STALE data (${rec.lastDate} ≠ ${expected}) → no new entry`); staleBlockedBuys++; continue; }
+        buyCandidates.push({ sym, last, rsi2, closes: c, tag });
       } else {
         // ---------- exits ----------
         const bounce = EXIT_MODE === 'sma5' ? last > sma(c, 5) : rsi2 > SELL_RSI2;
@@ -311,6 +321,10 @@ async function main() {
   }
 
   // --- pass 3: allocate ranked buys (deepest RSI-2 first) under all caps ---
+  if (staleBlockedBuys > 0) {
+    await alert('warn', `${staleBlockedBuys} buy signal(s) skipped: data older than ${expected}`,
+      'Entries need current bars. If this repeats daily, the data feed is not publishing today\'s bar by run time.');
+  }
   buyCandidates.sort((a, b) => a.rsi2 - b.rsi2);
   for (const cand of buyCandidates) {
     const { sym, last, rsi2, closes, tag } = cand;
