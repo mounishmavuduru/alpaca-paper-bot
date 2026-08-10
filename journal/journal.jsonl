@@ -1,0 +1,1 @@
+{"ts":"2026-08-10T22:00:41.884Z","bot":"rsi2","dry_run":false,"orders":[{"symbol":"EWZ","qty":"432","side":"buy","type":"market","time_in_force":"day","client_order_id":"rsi-buy-EWZ-2026-08-10"}],"incidents":[],"date_et":"2026-08-10","session":true,"equity":105956.12,"cash":105956.12,"circuit":{"tripped":false,"ddPct":0,"peak":105956.12,"resetApplied":false},"positions":[]}
