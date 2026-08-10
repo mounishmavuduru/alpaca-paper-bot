@@ -62,7 +62,7 @@ jobs:
           echo "journal push failed after retries" >&2
           exit 1
       - name: Discord alert on failure
-        if: failure()
+        if: failure() || cancelled()
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |

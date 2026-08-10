@@ -40,6 +40,10 @@ export function startMock(state) {
       }
       if (req.method === 'POST' && path === '/v2/orders') {
         const o = JSON.parse(body);
+        // Optional injected broker rejections: [{symbol, side, type?, status, message}]
+        const reject = (state.rejectOrders || []).find(r =>
+          r.symbol === o.symbol && r.side === o.side && (!r.type || r.type === o.type));
+        if (reject) return send({ message: reject.message || 'rejected', code: 40310000 }, reject.status || 403);
         if (o.client_order_id && state.orders.some(x => x.client_order_id === o.client_order_id)) {
           return send({ message: 'client order id must be unique' }, 422);
         }

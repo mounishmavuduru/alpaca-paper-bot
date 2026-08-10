@@ -112,6 +112,37 @@ test('held + bounce → cancels resting stop BEFORE selling (Aug 1 crash class)'
   assert.equal(placed(s).filter(o => o.type === 'stop').length, 0);
 });
 
+test('stop canceled but the sell then REJECTS → position is re-protected the same run', async () => {
+  const state = defaultState({ bars: { SPY: bounceSeries(), TLT: holdSeries() } });
+  state.positions.push({ symbol: 'SPY', qty: '100', avg_entry_price: '120', unrealized_pl: '500', unrealized_plpc: '0.04' });
+  // a stop placed earlier TODAY (same client_order_id the bot would reuse) and a broker that rejects the sell
+  state.orders.push({ id: 'stop_1', symbol: 'SPY', side: 'sell', type: 'stop', qty: '100', status: 'new', stop_price: '102', client_order_id: 'rsi-stop-SPY-2026-08-07' });
+  state.rejectOrders = [{ symbol: 'SPY', side: 'sell', type: 'market', status: 403, message: 'insufficient qty available' }];
+  const { code, state: s } = await runBot('bot.mjs', state);
+  assert.equal(code, 1, 'a failed exit must make the run red');
+  const stops = placed(s).filter(o => o.type === 'stop' && o.symbol === 'SPY');
+  assert.equal(stops.length, 1, 'the canceled stop must be re-placed when its sell fails');
+  assert.equal(stops[0].client_order_id, 'rsi-stop-SPY-2026-08-07-r', 'dead duplicate id retried under -r');
+});
+
+test('watchdog: no rotation run this month → loud alert on the daily bot (days 2–5)', async () => {
+  const d = '2026-08-04';
+  const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() }, barDate: d, calendar: [{ date: d }], clock: { timestamp: `${d}T22:00:00-04:00`, is_open: false } });
+  const { code, stdout } = await runBot('bot.mjs', state);
+  assert.equal(code, 1);
+  assert.match(stdout, /Rotation bot has NOT run this month/);
+});
+
+test('watchdog stays quiet when the rotation ran this month', async () => {
+  const d = '2026-08-04';
+  const journalDir = mkdtempSync(join(tmpdir(), 'bot-journal-'));
+  writeFileSync(join(journalDir, 'journal.jsonl'), JSON.stringify({ bot: 'rotation', date_et: '2026-08-01', session: false }) + '\n');
+  const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() }, barDate: d, calendar: [{ date: d }], clock: { timestamp: `${d}T22:00:00-04:00`, is_open: false } });
+  const { code, stdout } = await runBot('bot.mjs', state, { JOURNAL_DIR: journalDir });
+  assert.equal(code, 0);
+  assert.doesNotMatch(stdout, /has NOT run this month/);
+});
+
 test('held, no exit signal → server-side GTC catastrophe stop is placed', async () => {
   const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() } });
   state.positions.push({ symbol: 'SPY', qty: '100', avg_entry_price: '130', unrealized_pl: '0', unrealized_plpc: '0.0' });

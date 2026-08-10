@@ -31,7 +31,7 @@ import { wilderRSI, sma, realizedVol } from './lib/indicators.mjs';
 import * as alpaca from './lib/alpaca.mjs';
 import { getDailyBars, isFresh } from './lib/data.mjs';
 import { alert, note, flushSummary } from './lib/alerts.mjs';
-import { appendRun, circuitCheck, lastBuyDate, tradingDaysSince } from './lib/journal.mjs';
+import { appendRun, circuitCheck, lastBuyDate, lastRunDate, tradingDaysSince } from './lib/journal.mjs';
 
 // ---------- config (hard-fails on garbage; per-bot overrides beat shared vars) ----------
 const DRY_RUN = parseBool('DRY_RUN_RSI', parseBool('DRY_RUN', true));
@@ -128,6 +128,20 @@ async function main() {
         `client_order_id=${o.client_order_id} — the position this run's logic assumes may not exist.`);
     }
   } catch (e) { journal.incidents.push(`closed-order check: ${e.message}`); }
+
+  // --- watchdog: a silently dead monthly rotation already cost a full month (Aug 2026,
+  // when its run crashed mid-rebalance and nobody noticed for a week). The daily bot is
+  // the only thing that runs often enough to notice. Checked on days 2–5 so a missed
+  // monthly run is loud without becoming a month of daily nagging. ---
+  const dayOfMonth = Number(today.slice(8, 10));
+  if (dayOfMonth >= 2 && dayOfMonth <= 5) {
+    const lastRot = lastRunDate('rotation');
+    if (!lastRot || lastRot.slice(0, 7) !== today.slice(0, 7)) {
+      await alert('error', 'Rotation bot has NOT run this month',
+        `Last journaled rotation run: ${lastRot ?? 'never'}. Run it manually: Actions → Sector Rotation Bot → Run workflow.`);
+      process.exitCode = 1; // red run is the backstop channel when Discord isn't configured
+    }
+  }
 
   // --- circuit breaker (blocks new buys only; exits always allowed) ---
   const circuit = circuitCheck(equity, MAX_DRAWDOWN_PCT, { reset: CIRCUIT_RESET });
