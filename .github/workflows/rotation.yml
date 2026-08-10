@@ -41,17 +41,26 @@ jobs:
           MOM_SKIP: ${{ vars.MOM_SKIP || '21' }}            # 21 = academic 12-1 momentum (skip the mean-reverting last month)
           MOM_BLEND: ${{ vars.MOM_BLEND || 'false' }}       # 'true' = rank on mean of 3m/6m/12-1m momentum
           ROT_ALLOC_PCT: ${{ vars.ROT_ALLOC_PCT || '90' }}  # % of equity the rotation sleeve may deploy
+          MAX_DRAWDOWN_PCT: ${{ vars.MAX_DRAWDOWN_PCT || '12' }}
+          CIRCUIT_RESET: ${{ vars.CIRCUIT_RESET || 'false' }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'sip' }}
+          ALLOW_INTRADAY: ${{ vars.ALLOW_INTRADAY || 'false' }}
         run: node rotation_bot.mjs
       - name: Commit journal
         if: always()
         run: |
+          [ -d journal ] || exit 0
           git config user.name "trade-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add journal/
           git diff --cached --quiet && exit 0
           git commit -m "journal: rotation $(date -u +%F) run ${GITHUB_RUN_ID} [skip ci]"
-          git pull --rebase origin main
-          git push
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            sleep 3
+          done
+          echo "journal push failed after retries" >&2
+          exit 1
       - name: Discord alert on failure
         if: failure()
         env:

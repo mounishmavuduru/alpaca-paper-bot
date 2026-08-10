@@ -22,7 +22,7 @@ import { momentum } from './lib/indicators.mjs';
 import * as alpaca from './lib/alpaca.mjs';
 import { getDailyBars } from './lib/data.mjs';
 import { alert, note, flushSummary } from './lib/alerts.mjs';
-import { appendRun } from './lib/journal.mjs';
+import { appendRun, circuitCheck } from './lib/journal.mjs';
 
 const DRY_RUN = parseBool('DRY_RUN_ROT', parseBool('DRY_RUN', true));
 const KILL = parseBool('KILL_SWITCH_ROT', parseBool('KILL_SWITCH', false));
@@ -32,6 +32,8 @@ const TOP_N = parseNum('TOP_N', 3, { min: 1, max: 11 });
 const MOM_SKIP = parseNum('MOM_SKIP', 21, { min: 0, max: 63 });  // 21 = 12-1 momentum; 0 = v1 behavior
 const MOM_BLEND = parseBool('MOM_BLEND', false);                // rank on mean of 3m/6m/12-1m (specification-fragility hedge)
 const ROT_ALLOC_PCT = parseNum('ROT_ALLOC_PCT', 90, { min: 10, max: 100 }) / 100; // % of equity the sleeve may use
+const MAX_DRAWDOWN_PCT = parseNum('MAX_DRAWDOWN_PCT', 12, { min: 2, max: 90 });
+const CIRCUIT_RESET = parseBool('CIRCUIT_RESET', false);
 const ALLOW_INTRADAY = parseBool('ALLOW_INTRADAY', false);
 
 const journal = { ts: new Date().toISOString(), bot: 'rotation', dry_run: DRY_RUN, orders: [], incidents: [] };
@@ -43,6 +45,7 @@ async function main() {
 
   const { date: today, is_open } = await alpaca.todayET();
   journal.date_et = today;
+  journal.session = false; // monthly bot: never counts toward the RSI bot's trading-day math
   // Monthly cadence must not be skipped on a weekend 1st — Friday's close is a valid
   // monthly signal and queued orders fill at the next open. Only guard intraday runs.
   let dryRun = DRY_RUN;
@@ -50,6 +53,7 @@ async function main() {
     await alert('warn', 'Market is open — forcing DRY RUN', 'Monthly signals use completed daily bars. Set ALLOW_INTRADAY=true to override.');
     dryRun = true;
   }
+  journal.dry_run = dryRun;
 
   const acct = await alpaca.getAccount();
   const equity = Number(acct.equity);
@@ -68,24 +72,41 @@ async function main() {
   const ordersFor = (sym) => openOrders.filter(o => o.symbol === sym);
   console.log(`My sector positions: ${mine.map(p => p.symbol).join(', ') || '(none)'}`);
 
-  // Surface async order failures from the last few days (accepted → rejected at open)
+  // Surface async order failures since the LAST monthly run (accepted → rejected at open);
+  // a short window here would mean a rejection on the 2nd is never seen by a monthly bot.
   try {
-    const closed = await alpaca.getClosedOrdersSince(new Date(Date.now() - 4 * 86_400_000).toISOString());
+    const closed = await alpaca.getClosedOrdersSince(new Date(Date.now() - 40 * 86_400_000).toISOString());
     for (const o of closed.filter(o => o.client_order_id?.startsWith('rot-') && ['rejected', 'expired'].includes(o.status))) {
       await alert('error', `Rotation order ${o.status} after acceptance: ${o.side} ${o.qty} ${o.symbol}`,
         `client_order_id=${o.client_order_id} — the rotation may be incomplete; re-run via workflow_dispatch after checking.`);
     }
   } catch (e) { journal.incidents.push(`closed-order check: ${e.message}`); }
 
-  // --- rank by 12-1 momentum on adjusted closes ---
-  const { bars, failures } = await getDailyBars(SECTORS);
+  // --- circuit breaker (shared state with the RSI bot): a deep account drawdown halts
+  // rotation BUYS too; sells/rebalancing-out still run. ---
+  const circuit = circuitCheck(equity, MAX_DRAWDOWN_PCT, { reset: CIRCUIT_RESET });
+  journal.circuit = circuit;
+  if (circuit.tripped) await alert('error', `CIRCUIT BREAKER: drawdown ${circuit.ddPct.toFixed(1)}% from peak — rotation buys halted`);
+
+  // --- rank by 12-1 momentum on adjusted closes. Symbols with queued BUY orders (the
+  // RSI bot's included) are fetched separately so the cash budget can price them. ---
+  const MIN_BARS = 253 + MOM_SKIP;
+  const { bars, failures } = await getDailyBars(SECTORS, MIN_BARS);
+  const priceOnly = [...new Set(openOrders.filter(o => o.side === 'buy').map(o => o.symbol))].filter(s => !bars.has(s));
+  if (priceOnly.length) {
+    const extra = await getDailyBars(priceOnly, 2);
+    for (const [k, v] of extra.bars) bars.set(k, v);
+  }
   const failed = new Set(failures.map(f => f.sym));
   for (const f of failures) journal.incidents.push(`data: ${f.sym}: ${f.error}`);
 
+  // Stale series (>7 calendar days old) are as untrustworthy as missing ones: hold, don't rank.
+  const staleBefore = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
   const ranked = [];
   for (const s of SECTORS) {
     const rec = bars.get(s);
-    if (!rec || rec.closes.length < 253 + MOM_SKIP) { failed.add(s); continue; }
+    if (!rec || rec.closes.length < MIN_BARS) { failed.add(s); continue; }
+    if (rec.lastDate && rec.lastDate < staleBefore) { failed.add(s); journal.incidents.push(`stale data: ${s} last bar ${rec.lastDate}`); continue; }
     const mom = MOM_BLEND
       ? (momentum(rec.closes, 63) + momentum(rec.closes, 126) + momentum(rec.closes, 252, MOM_SKIP)) / 3
       : momentum(rec.closes, 252, MOM_SKIP);
@@ -120,10 +141,11 @@ async function main() {
     try {
       if (targetSet.has(sym)) { console.log(`${sym} → keep (in target)`); continue; }
       if (failed.has(sym)) { console.log(`${sym} → data unavailable — HOLDING, not a rotation decision`); continue; }
-      if (ordersFor(sym).some(o => o.side === 'sell' && o.type !== 'stop')) { console.log(`${sym} → sell already queued, skip`); continue; }
+      if (ordersFor(sym).some(o => o.side === 'sell' && !['stop', 'stop_limit', 'trailing_stop'].includes(o.type))) { console.log(`${sym} → sell already queued, skip`); continue; }
       for (const o of ordersFor(sym)) {
         if (dryRun) { console.log(`${sym} → WOULD cancel open ${o.type} order first`); continue; }
-        await alpaca.cancelOrder(o.id);
+        const done = await alpaca.cancelAndWait(o.id);
+        if (!done) throw new Error(`open ${o.type} order ${o.id} still not canceled — not selling ${sym} this run`);
         console.log(`${sym} → canceled open ${o.type} order ${o.id.slice(0, 8)}…`);
       }
       await place(
@@ -139,11 +161,15 @@ async function main() {
     }
   }
 
-  // --- BUY target sectors not held. Budget = cash − queued buys + haircut proceeds. ---
+  // --- BUY target sectors not held. Budget = cash − queued buys + haircut proceeds.
+  // A queued buy we cannot price zeroes the cash portion (conservative). ---
   let budget = Math.max(0, cash);
   for (const o of openOrders.filter(o => o.side === 'buy')) {
-    const est = o.notional ? Number(o.notional) : Number(o.qty) * (bars.get(o.symbol)?.closes.at(-1) ?? 0);
-    budget -= est;
+    const est = o.notional ? Number(o.notional)
+      : Number(o.limit_price || 0) > 0 ? Number(o.qty) * Number(o.limit_price)
+      : Number(o.qty) * (bars.get(o.symbol)?.closes.at(-1) ?? NaN);
+    if (Number.isFinite(est)) budget -= est;
+    else { journal.incidents.push(`unpriceable queued buy ${o.symbol} — cash budget zeroed`); budget = 0; }
   }
   budget = Math.max(0, budget) + saleProceeds * 0.98; // 2% haircut for overnight gap on unfilled sells
   const perSlot = (equity * ROT_ALLOC_PCT) / TOP_N;
@@ -151,6 +177,7 @@ async function main() {
   for (const t of target) {
     try {
       if (mine.some(p => p.symbol === t.s)) continue;
+      if (circuit.tripped) { console.log(`${t.s} → target, but circuit breaker tripped → no new buys`); continue; }
       if (ordersFor(t.s).some(o => o.side === 'buy')) { console.log(`${t.s} → buy already queued, skip`); continue; }
       const notional = Math.min(perSlot, budget);
       const qty = Math.floor(notional / t.price);

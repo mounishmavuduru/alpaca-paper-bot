@@ -82,15 +82,19 @@ async function main() {
   // --- calendar gate: no decisions off stale bars (holiday runs re-bought in v1) ---
   const { date: today, is_open } = await alpaca.todayET();
   journal.date_et = today;
-  if (!(await alpaca.isTradingDay(today)) && !FORCE_RUN) {
+  const tradingDay = await alpaca.isTradingDay(today);
+  if (!tradingDay && !FORCE_RUN) {
+    journal.session = false;
     console.log(`${today} is not a trading day — nothing to do (FORCE_RUN=true overrides).`);
     return;
   }
+  journal.session = true;
   let dryRun = DRY_RUN;
   if (is_open && !ALLOW_INTRADAY && !dryRun) {
     await alert('warn', 'Market is open — forcing DRY RUN', 'Daily signals would use a partial intraday bar. Set ALLOW_INTRADAY=true to trade intraday anyway.');
     dryRun = true;
   }
+  journal.dry_run = dryRun;
 
   // --- account state ---
   const acct = await alpaca.getAccount();
@@ -108,10 +112,13 @@ async function main() {
   const openOrders = await alpaca.getOpenOrders();
   const myPositions = positions.filter(p => SYMBOLS.includes(p.symbol));
   const ordersFor = (sym) => openOrders.filter(o => o.symbol === sym);
+  const stopLike = (o) => ['stop', 'stop_limit', 'trailing_stop'].includes(o.type);
   const pendingBuy = (sym) => ordersFor(sym).some(o => o.side === 'buy');
-  const pendingSell = (sym) => ordersFor(sym).some(o => o.side === 'sell' && o.type !== 'stop');
-  const openStop = (sym) => ordersFor(sym).find(o => o.side === 'sell' && o.type === 'stop');
+  const pendingSell = (sym) => ordersFor(sym).some(o => o.side === 'sell' && !stopLike(o));
+  const openStop = (sym) => ordersFor(sym).find(o => o.side === 'sell' && stopLike(o));
   console.log(`My positions: ${myPositions.map(p => p.symbol).join(', ') || '(none)'} | open orders: ${openOrders.map(o => `${o.side} ${o.symbol}`).join(', ') || '(none)'}`);
+  const unmanaged = positions.filter(p => !SYMBOLS.includes(p.symbol) && !SECTORS.includes(p.symbol));
+  if (unmanaged.length) note(`⚠️ positions in NEITHER bot's universe (unmanaged, no exits will ever fire): ${unmanaged.map(p => p.symbol).join(', ')}`);
 
   // --- surface async order failures from prior runs (accepted → rejected/expired at open) ---
   try {
@@ -127,13 +134,26 @@ async function main() {
   journal.circuit = circuit;
   if (circuit.tripped) {
     await alert('error', `CIRCUIT BREAKER: drawdown ${circuit.ddPct.toFixed(1)}% from peak $${circuit.peak.toFixed(0)}`,
-      'New buys HALTED (exits still run). Investigate, then set CIRCUIT_RESET=true for one run to re-arm.');
+      'New buys HALTED (exits still run). Investigate, then set CIRCUIT_RESET=true to re-arm.');
+  }
+  if (circuit.resetApplied) {
+    await alert('warn', `Circuit breaker re-armed at $${equity.toFixed(0)}`, 'Now REMOVE the CIRCUIT_RESET variable — leaving it set auto-re-arms every future trip.');
   }
 
-  // --- data (dividend-adjusted, multi-source, retried) ---
-  const { bars, failures } = await getDailyBars([...new Set([...SYMBOLS, 'SPY'])]);
+  // --- data (dividend-adjusted, multi-source, retried). Universe symbols need full
+  // indicator history; symbols with queued BUY orders (even outside our universe) are
+  // fetched separately just so the cash budget can price them.
+  const { bars, failures } = await getDailyBars([...new Set([...SYMBOLS, 'SPY'])], 201);
+  const priceOnly = [...new Set(openOrders.filter(o => o.side === 'buy').map(o => o.symbol))].filter(s => !bars.has(s));
+  if (priceOnly.length) {
+    const extra = await getDailyBars(priceOnly, 2);
+    for (const [k, v] of extra.bars) bars.set(k, v);
+  }
   for (const f of failures) journal.incidents.push(`data: ${f.sym}: ${f.error}`);
-  const expected = [...bars.values()].map(b => b.lastDate).sort().at(-1);
+  // Freshness anchor: today IS a trading session (calendar-checked above), so bars are
+  // expected through today — never "the newest date any source happened to return",
+  // which would wave through a uniformly-stale feed.
+  const expected = tradingDay ? today : [...bars.values()].map(b => b.lastDate).sort().at(-1);
 
   const spyBars = bars.get('SPY');
   const spyRsi2 = spyBars && spyBars.closes.length > 2 ? wilderRSI(spyBars.closes, 2) : null;
@@ -142,12 +162,15 @@ async function main() {
   if (regimeBlocked) await alert('warn', 'SPY regime data unavailable — blocking all buys this run (gate is configured)');
   console.log(`Market regime: SPY RSI-2 = ${spyRsi2 == null ? 'n/a' : spyRsi2.toFixed(0)} | data as of ${expected}\n`);
 
-  // --- cash budget: cash minus what queued buys will consume (sell proceeds not counted) ---
+  // --- cash budget: cash minus what queued buys will consume (sell proceeds not counted).
+  // A queued buy we cannot price at all zeroes the budget — the conservative direction. ---
   let budget = Math.max(0, cash);
   for (const o of openOrders.filter(o => o.side === 'buy')) {
-    budget -= o.notional ? Number(o.notional)
+    const est = o.notional ? Number(o.notional)
       : Number(o.limit_price || 0) > 0 ? Number(o.qty) * Number(o.limit_price)
-      : Number(o.qty) * (bars.get(o.symbol)?.closes.at(-1) ?? 0);
+      : Number(o.qty) * (bars.get(o.symbol)?.closes.at(-1) ?? NaN);
+    if (Number.isFinite(est)) budget -= est;
+    else { journal.incidents.push(`unpriceable queued buy ${o.symbol} — buys suspended this run`); budget = 0; }
   }
   budget = Math.max(0, budget);
 
@@ -171,7 +194,8 @@ async function main() {
   // collected for ranked allocation. Exits run BEFORE stop reconciliation so we never
   // sell shares that a stop placed this same run is holding.
   const buyCandidates = [];
-  const exitedSyms = new Set();   // symbols with a sell placed or already pending
+  const exitedSyms = new Set();     // symbols with a sell placed or already pending
+  const canceledStops = new Set();  // stops WE canceled this run (the snapshot won't know)
   for (const sym of SYMBOLS) {
     try {
       const rec = bars.get(sym);
@@ -180,10 +204,11 @@ async function main() {
 
       if (!rec || rec.closes.length < 201) {
         if (pos) {
+          if (pendingSell(sym)) { console.log(`${sym}: no data, but exit already queued`); exitedSyms.add(sym); continue; }
           // Fail closed: no market data, but the broker's own P&L still lets us enforce the catastrophe stop.
-          if (Number.isFinite(brokerLossPct) && brokerLossPct <= -STOP_PCT && !pendingSell(sym)) {
+          if (Number.isFinite(brokerLossPct) && brokerLossPct <= -STOP_PCT) {
             const stop = openStop(sym);
-            if (stop && !dryRun) await alpaca.cancelOrder(stop.id);
+            if (stop && !dryRun) { await alpaca.cancelAndWait(stop.id); canceledStops.add(sym); }
             await place(
               { symbol: sym, qty: pos.qty, side: 'sell', type: 'market', time_in_force: 'day', client_order_id: `rsi-sell-${sym}-${today}` },
               `SELL ${pos.qty} ${sym} @ market (hard stop ${(brokerLossPct * 100).toFixed(1)}% — broker P&L, no market data)`,
@@ -203,6 +228,7 @@ async function main() {
         journal.incidents.push(`stale data: ${sym} last bar ${rec.lastDate} vs ${expected}`);
         if (pos) await alert('warn', `Stale data for held ${sym} (${rec.lastDate}) — exits evaluated on old bar`);
       }
+      if (rec.source === 'yahoo-RAW') journal.incidents.push(`${sym}: dividend-UNadjusted fallback data in use`);
 
       const c = rec.closes;
       const last = c.at(-1);
@@ -227,11 +253,14 @@ async function main() {
         if (!reason) { console.log(`${tag} → holding (entry $${Number(pos.avg_entry_price).toFixed(2)}, ${(brokerLossPct * 100).toFixed(1)}%${entryDate ? `, ${heldDays}d` : ''})`); continue; }
         if (pendingSell(sym)) { console.log(`${tag} → sell already queued, skip`); exitedSyms.add(sym); continue; }
 
-        // Cancel the resting stop first — selling with an active stop 403s with
-        // "insufficient qty available" (the 2026-08-01 crash).
+        // Cancel the resting stop first and WAIT for the cancel to land — selling while
+        // the stop still reserves the shares 403s with "insufficient qty available"
+        // (the 2026-08-01 crash), and Alpaca cancels are asynchronous.
         const stop = openStop(sym);
         if (stop && !dryRun) {
-          await alpaca.cancelOrder(stop.id);
+          const done = await alpaca.cancelAndWait(stop.id);
+          canceledStops.add(sym);
+          if (!done) throw new Error(`stop ${stop.id} still not canceled — not selling ${sym} this run`);
           console.log(`${tag} → canceled catastrophe stop ${stop.id.slice(0, 8)}…`);
         }
         await place(
@@ -247,11 +276,14 @@ async function main() {
     }
   }
 
-  // --- pass 2: reconcile server-side catastrophe stops for positions we are KEEPING ---
+  // --- pass 2: reconcile server-side catastrophe stops for positions we are KEEPING.
+  // A stop we canceled this run whose sell then FAILED must be re-placed, so a
+  // canceled-by-us stop does not count as "still open".
   for (const pos of myPositions) {
     const sym = pos.symbol;
     const wholeQty = Math.floor(Number(pos.qty));
-    if (wholeQty < 1 || exitedSyms.has(sym) || openStop(sym) || pendingSell(sym)) continue;
+    if (wholeQty < 1) { if (!exitedSyms.has(sym)) console.log(`${sym}: fractional position (${pos.qty}) — GTC stops need whole shares, relying on daily checks`); continue; }
+    if (exitedSyms.has(sym) || (openStop(sym) && !canceledStops.has(sym)) || pendingSell(sym)) continue;
     const stopPrice = (Number(pos.avg_entry_price) * (1 - STOP_PCT)).toFixed(2);
     try {
       await place(

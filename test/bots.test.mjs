@@ -78,6 +78,16 @@ test('REGRESSION Jun 18-19: pending queued buy → no duplicate buy on re-run', 
   assert.equal(placed(s).length, 0, 'must not re-buy while a buy order is queued');
 });
 
+test('dead duplicate client_order_id (rejected earlier today) → retried under -r suffix', async () => {
+  const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() } });
+  state.orders.push({ id: 'dead_1', symbol: 'SPY', side: 'buy', type: 'market', qty: '10', status: 'rejected', client_order_id: 'rsi-buy-SPY-2026-08-07' });
+  const { code, state: s } = await runBot('bot.mjs', state);
+  assert.equal(code, 0);
+  const buys = placed(s).filter(o => o.side === 'buy');
+  assert.equal(buys.length, 1, 'the wanted buy must not be silently dropped');
+  assert.equal(buys[0].client_order_id, 'rsi-buy-SPY-2026-08-07-r');
+});
+
 test('REGRESSION Juneteenth: holiday run places nothing', async () => {
   const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() }, calendar: [] });
   const { code, state: s, stdout } = await runBot('bot.mjs', state);

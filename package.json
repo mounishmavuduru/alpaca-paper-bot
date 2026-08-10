@@ -7,6 +7,6 @@
   "scripts": {
     "trade": "node bot.mjs",
     "rotate": "node rotation_bot.mjs",
-    "test": "node --test test/indicators.test.mjs test/config.test.mjs test/bots.test.mjs"
+    "test": "node --test test/indicators.test.mjs test/config.test.mjs test/journal.test.mjs test/bots.test.mjs"
   }
 }

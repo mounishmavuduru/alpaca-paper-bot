@@ -54,17 +54,32 @@ jobs:
           CIRCUIT_RESET: ${{ vars.CIRCUIT_RESET || 'false' }}
           ENTRY_MODE: ${{ vars.ENTRY_MODE || 'market' }}    # 'limit' = limit at signal close (less open-auction slippage)
           EXIT_MODE: ${{ vars.EXIT_MODE || 'rsi' }}         # 'sma5' = Connors' published close>5SMA exit
+          BUY_RSI2: ${{ vars.BUY_RSI2 || '5' }}
+          SELL_RSI2: ${{ vars.SELL_RSI2 || '65' }}
+          TREND_BUFFER_PCT: ${{ vars.TREND_BUFFER_PCT || '3' }}
+          RISK_SCALING: ${{ vars.RISK_SCALING || 'true' }}
+          VOL_TARGET: ${{ vars.VOL_TARGET || '20' }}
+          MIN_ORDER_USD: ${{ vars.MIN_ORDER_USD || '500' }}
+          ORDER_CAP: ${{ vars.ORDER_CAP || '10' }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'sip' }}
+          ALLOW_INTRADAY: ${{ vars.ALLOW_INTRADAY || 'false' }}
+          FORCE_RUN: ${{ vars.FORCE_RUN || 'false' }}
         run: node bot.mjs
       - name: Commit journal
         if: always()
         run: |
+          [ -d journal ] || exit 0
           git config user.name "trade-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add journal/
           git diff --cached --quiet && exit 0
           git commit -m "journal: $(date -u +%F) run ${GITHUB_RUN_ID} [skip ci]"
-          git pull --rebase origin main
-          git push
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            sleep 3
+          done
+          echo "journal push failed after retries" >&2
+          exit 1
       - name: Discord alert on failure
         if: failure()
         env:

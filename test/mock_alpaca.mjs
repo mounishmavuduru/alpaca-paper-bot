@@ -26,6 +26,11 @@ export function startMock(state) {
       if (req.method === 'GET' && path === '/v2/clock') return send(state.clock);
       if (req.method === 'GET' && path === '/v2/calendar') return send(state.calendar);
 
+      if (req.method === 'GET' && path === '/v2/orders:by_client_order_id') {
+        const coid = url.searchParams.get('client_order_id');
+        const o = state.orders.find(x => x.client_order_id === coid);
+        return o ? send(o) : send({ message: 'order not found' }, 404);
+      }
       if (req.method === 'GET' && path === '/v2/orders') {
         const status = url.searchParams.get('status') || 'open';
         const match = (o) => status === 'all' ? true
@@ -42,11 +47,19 @@ export function startMock(state) {
         state.orders.push(rec);
         return send(rec);
       }
+      if (req.method === 'GET' && path.startsWith('/v2/orders/')) {
+        const id = path.split('/').pop();
+        const o = state.orders.find(x => x.id === id);
+        if (!o) return send({ message: 'order not found' }, 404);
+        const snapshot = { ...o };
+        if (o.status === 'pending_cancel') o.status = 'canceled'; // async cancel completes after one poll
+        return send(snapshot);
+      }
       if (req.method === 'DELETE' && path.startsWith('/v2/orders/')) {
         const id = path.split('/').pop();
         const o = state.orders.find(x => x.id === id);
         if (!o) return send({ message: 'order not found' }, 404);
-        o.status = 'canceled';
+        o.status = 'pending_cancel'; // Alpaca cancels are asynchronous
         return send(null, 204);
       }
 
