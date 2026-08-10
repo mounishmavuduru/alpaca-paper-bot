@@ -49,6 +49,12 @@ export function startMock(state) {
         }
         const rec = { id: `ord_${++orderSeq}`, status: 'new', ...o };
         state.orders.push(rec);
+        // Optional: simulate an order that LANDS but whose response is lost (503), which
+        // is what makes a blind client-side retry dangerous.
+        if (state.loseFirstOrderResponse) {
+          state.loseFirstOrderResponse = false;
+          return send({ message: 'service unavailable' }, 503);
+        }
         return send(rec);
       }
       if (req.method === 'GET' && path.startsWith('/v2/orders/')) {

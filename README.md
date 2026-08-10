@@ -83,8 +83,8 @@ keeps the schedules alive. `journal/state.json` carries the circuit-breaker peak
 ## Development
 
 ```bash
-npm test          # 41 tests: indicator golden values, config + circuit-breaker units, and
-                  # 28 end-to-end scenarios running the real bots against a mock Alpaca broker
+npm test          # 42 tests: indicator golden values, config + circuit-breaker units, and
+                  # 29 end-to-end scenarios running the real bots against a mock Alpaca broker
 npm run trade     # run the RSI-2 bot locally (needs ALPACA_KEY/SECRET; DRY_RUN defaults true)
 npm run rotate    # run the rotation bot locally
 ```

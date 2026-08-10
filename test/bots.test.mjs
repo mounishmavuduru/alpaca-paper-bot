@@ -93,6 +93,18 @@ test('dead duplicate client_order_id (rejected earlier today) → retried under 
   assert.equal(buys[0].client_order_id, 'rsi-buy-SPY-2026-08-07-r');
 });
 
+test('an order that LANDS but whose response is lost is not placed twice by the retry', async () => {
+  // The hardest duplicate-order case: POST succeeds server-side, the 503 response makes the
+  // client retry, and only the client_order_id uniqueness check stands between us and a
+  // double position. The retry must resolve to "already placed", not a second live order.
+  const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() }, loseFirstOrderResponse: true });
+  const { code, state: s } = await runBot('bot.mjs', state);
+  assert.equal(code, 0);
+  const buys = placed(s).filter(o => o.side === 'buy' && o.symbol === 'SPY');
+  assert.equal(buys.length, 1, 'exactly one live order despite the retry');
+  assert.equal(buys[0].client_order_id, 'rsi-buy-SPY-2026-08-07', 'and NOT retried under a -r suffix (the order was live, not dead)');
+});
+
 test('REGRESSION Juneteenth: holiday run places nothing', async () => {
   const state = defaultState({ bars: { SPY: dipSeries(), TLT: holdSeries() }, calendar: [] });
   const { code, state: s, stdout } = await runBot('bot.mjs', state);
