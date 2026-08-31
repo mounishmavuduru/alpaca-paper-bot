@@ -1,3 +1,32 @@
+# v2.1.1 — 2026-08-31 — stuck stop-cancel (live incident 2026-08-27)
+
+Run 33130477058 failed with two alerts. Both traced to one 4-second timeout.
+
+1. **The trigger.** SMH hit its bounce exit. The bot canceled the resting GTC stop first
+   (correct — shares reserved by a live stop cannot be sold), but Alpaca cancels are
+   asynchronous and `cancelAndWait` polled for only 8 x 500ms. It returned `pending_cancel`,
+   so the bot refused to sell. That fail-closed behaviour was right; the window was too short.
+2. **The bug.** `canceledStops.add(sym)` ran *before* the "did the cancel actually land?"
+   check, so pass 2 believed the stop was gone and tried to place a second one over shares
+   the first still reserved: `403 ... held_for_orders: "14", available: "0"`. The run then
+   reported `UNPROTECTED` for a position that was, at that moment, still protected.
+3. **The real cost.** The cancel landed after the process exited, so SMH held no stop for
+   ~21 hours until the next run re-placed it, and the bounce exit was missed entirely.
+
+Fixes:
+- A symbol enters `canceledStops` only once the cancel is CONFIRMED terminal-and-freed
+  (both call sites). A stop whose cancel is still pending is left alone by pass 2.
+- `cancelAndWait` polls 20 x 1s (was 8 x 500ms). The job budget is 10 minutes.
+- A stuck cancel now says what is actually at risk — that the cancel may land later and
+  leave the position unprotected until the next run — instead of implying the stop still rests.
+- The mock broker now enforces `held_for_orders` share reservation on every sell, so this
+  class of bug is reproducible in tests rather than only in production.
+
+Also fixed, found while reproducing the above: the rotation bot's 7-day staleness check
+compared bar dates against the *runner's* wall clock rather than the broker's ET session
+date. Harmless in production (they agree), but it is the only date in either bot not
+anchored to the market clock, and it silently rotted five tests as their fixture aged.
+
 # v2.0.0 — 2026-08-09 — full hardening after forensic audit
 
 A multi-agent audit of the code plus all 45 GitHub Actions run logs (2026-06-18 → 2026-08-07)
@@ -57,7 +86,7 @@ Every numbered item below was **observed live**, not theoretical.
   actions, minimal permissions, `timeout-minutes`, Node 24, committed JSONL journal (also
   the 60-day-disable keepalive), Discord alerts + failure steps, async-rejection
   reconciliation (accepted-then-rejected orders surface next run).
-- 46 tests: indicator golden values, config + circuit-breaker units, and 33 end-to-end
+- 47 tests: indicator golden values, config + circuit-breaker units, and 34 end-to-end
   scenarios running the real bots against a mock Alpaca broker — including regression tests
   for incidents 1, 2, 3, and 5 above.
 - A watchdog in the daily bot alerts (and fails the run) if no rotation run was journaled by

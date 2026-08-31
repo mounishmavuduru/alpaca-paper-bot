@@ -114,7 +114,10 @@ async function main() {
   for (const f of failures) journal.incidents.push(`data: ${f.sym}: ${f.error}`);
 
   // Stale series (>7 calendar days old) are as untrustworthy as missing ones: hold, don't rank.
-  const staleBefore = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
+  // Anchored to the broker's ET session date, like every other date in this bot — the
+  // runner's wall clock is a different clock and need not agree with the market's.
+  const staleBefore = new Date(new Date(`${today}T12:00:00Z`).getTime() - 7 * 86_400_000)
+    .toISOString().slice(0, 10);
   const ranked = [];
   for (const s of SECTORS) {
     const rec = bars.get(s);

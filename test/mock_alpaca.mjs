@@ -47,6 +47,29 @@ export function startMock(state) {
         if (o.client_order_id && state.orders.some(x => x.client_order_id === o.client_order_id)) {
           return send({ message: 'client order id must be unique' }, 422);
         }
+        // Real brokers reserve shares against every OPEN sell order — including one whose
+        // cancel is still pending. Placing a second sell over the same shares 403s.
+        if (o.side === 'sell' && state.enforceHeldQty !== false) {
+          const pos = state.positions.find(p => p.symbol === o.symbol);
+          const existing = pos ? Math.floor(Number(pos.qty)) : 0;
+          const heldFor = state.orders
+            .filter(x => x.symbol === o.symbol && x.side === 'sell' && (OPEN_STATUSES.has(x.status) || x.status === 'pending_cancel'))
+            .reduce((n, x) => n + Math.floor(Number(x.qty)), 0);
+          const available = existing - heldFor;
+          if (Math.floor(Number(o.qty)) > available) {
+            return send({
+              available: String(Math.max(available, 0)),
+              code: 40310000,
+              existing_qty: String(existing),
+              held_for_orders: String(heldFor),
+              message: `insufficient qty available for order (requested: ${o.qty}, available: ${Math.max(available, 0)})`,
+              related_orders: state.orders
+                .filter(x => x.symbol === o.symbol && x.side === 'sell' && (OPEN_STATUSES.has(x.status) || x.status === 'pending_cancel'))
+                .map(x => x.id),
+              symbol: o.symbol,
+            }, 403);
+          }
+        }
         const rec = { id: `ord_${++orderSeq}`, status: 'new', ...o };
         state.orders.push(rec);
         // Optional: simulate an order that LANDS but whose response is lost (503), which
@@ -62,7 +85,9 @@ export function startMock(state) {
         const o = state.orders.find(x => x.id === id);
         if (!o) return send({ message: 'order not found' }, 404);
         const snapshot = { ...o };
-        if (o.status === 'pending_cancel') o.status = 'canceled'; // async cancel completes after one poll
+        // Async cancel normally completes after one poll. state.stuckCancels holds ids whose
+        // cancel never lands inside the poll window — the 2026-08-27 SMH incident.
+        if (o.status === 'pending_cancel' && !(state.stuckCancels || []).includes(id)) o.status = 'canceled';
         return send(snapshot);
       }
       if (req.method === 'DELETE' && path.startsWith('/v2/orders/')) {

@@ -121,6 +121,14 @@ async function main() {
   const pendingBuy = (sym) => ordersFor(sym).some(o => o.side === 'buy');
   const pendingSell = (sym) => ordersFor(sym).some(o => o.side === 'sell' && !stopLike(o));
   const openStop = (sym) => ordersFor(sym).find(o => o.side === 'sell' && stopLike(o));
+  // A cancel that never reached a terminal state is the dangerous case: Alpaca may still
+  // apply it minutes later, leaving the position with no resting stop until the next run.
+  // Say so explicitly rather than implying the old stop is safely in place.
+  const stopStuck = (id, status, sym) => status === 'pending_cancel'
+    ? `stop ${id} still '${status}' after ${alpaca.CANCEL_WAIT_SECONDS}s — not selling ${sym}. `
+      + `The cancel may land after this run, leaving ${sym} UNPROTECTED until the next run `
+      + `re-places its stop. Check the position now.`
+    : `stop ${id} ended '${status}' — shares not free, not selling ${sym}`;
   console.log(`My positions: ${myPositions.map(p => p.symbol).join(', ') || '(none)'} | open orders: ${openOrders.map(o => `${o.side} ${o.symbol}`).join(', ') || '(none)'}`);
   // A position outside BOTH universes gets no exits and no stop reconciliation from anyone —
   // it would sit unmanaged forever. That must be loud on every channel, every day, until it
@@ -248,8 +256,11 @@ async function main() {
             const stop = openStop(sym);
             if (stop && !dryRun) {
               const st = await alpaca.cancelAndWait(stop.id);
+              // Only a CONFIRMED cancel frees the shares. Recording it before the check would
+              // make pass 2 think the stop is gone and place a second one against shares the
+              // first still reserves — a guaranteed 403 plus a false UNPROTECTED alert.
+              if (!alpaca.FREED.has(st)) throw new Error(stopStuck(stop.id, st, sym));
               canceledStops.add(sym);
-              if (!alpaca.FREED.has(st)) throw new Error(`stop ${stop.id} ended '${st}' — shares not free, not selling ${sym}`);
             }
             await place(
               { symbol: sym, qty: pos.qty, side: 'sell', type: 'market', time_in_force: 'day', client_order_id: `rsi-sell-${sym}-${today}` },
@@ -305,9 +316,11 @@ async function main() {
         const stop = openStop(sym);
         if (stop && !dryRun) {
           const st = await alpaca.cancelAndWait(stop.id);
-          canceledStops.add(sym);
           // 'filled' here means the stop already sold the position — selling again would short it.
-          if (!alpaca.FREED.has(st)) throw new Error(`stop ${stop.id} ended '${st}' — shares not free, not selling ${sym}`);
+          // Record the cancel ONLY once it is confirmed: an unconfirmed cancel leaves the old
+          // stop resting on the shares, and pass 2 must then leave that stop alone.
+          if (!alpaca.FREED.has(st)) throw new Error(stopStuck(stop.id, st, sym));
+          canceledStops.add(sym);
           console.log(`${tag} → canceled catastrophe stop ${stop.id.slice(0, 8)}…`);
         }
         await place(

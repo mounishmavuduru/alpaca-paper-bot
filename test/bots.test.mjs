@@ -224,6 +224,32 @@ test('a stop that FILLED during cancellation must not trigger a second sell (wou
   assert.equal(placed(s).filter(o => o.side === 'sell' && o.type === 'market').length, 0, 'no second sell');
 });
 
+// REGRESSION 2026-08-27 (run 33130477058): SMH's stop cancel was still 'pending_cancel'
+// when the 4s poll window expired. The exit correctly aborted — but the symbol had already
+// been recorded in canceledStops, so pass 2 treated the still-resting stop as gone and
+// placed a SECOND stop over shares the first one still reserved. Alpaca 403'd
+// (held_for_orders 14, available 0) and the bot cried UNPROTECTED about a position that
+// was, at that moment, still protected.
+test('REGRESSION Aug 27: a cancel stuck in pending_cancel must not trigger a second stop', async () => {
+  const state = defaultState({ bars: { SMH: bounceSeries(), TLT: holdSeries() } });
+  state.positions.push({ symbol: 'SMH', qty: '14', avg_entry_price: '556.78', unrealized_pl: '-50', unrealized_plpc: '-0.005' });
+  state.orders.push({ id: 'stop_smh', symbol: 'SMH', side: 'sell', type: 'stop', qty: '14', status: 'new', stop_price: '473.26' });
+  state.stuckCancels = ['stop_smh'];   // the cancel never lands inside the poll window
+  const { code, state: s, stdout } = await runBot('bot.mjs', state, {
+    SYMBOLS: 'SMH,TLT', CANCEL_WAIT_TRIES: '4', CANCEL_WAIT_DELAY_MS: '5',
+  });
+  assert.equal(code, 1, 'an exit the bot could not execute must fail the run');
+  assert.equal(placed(s).filter(o => o.side === 'sell' && o.type === 'market').length, 0,
+    'shares are still reserved by the un-canceled stop: no sell');
+  assert.equal(s.requests.filter(r => r === 'POST /v2/orders').length, 0,
+    'no second stop may be attempted while the first one still holds the shares');
+  assert.doesNotMatch(stdout, /UNPROTECTED: could not place catastrophe stop/,
+    'the original stop is still resting — the pass-2 false alarm must not fire');
+  assert.match(stdout, /pending_cancel/);
+  assert.match(stdout, /may land after this run/, 'the real risk must be stated plainly');
+  assert.equal(s.orders.find(o => o.id === 'stop_smh').status, 'pending_cancel', 'stop still resting');
+});
+
 test('failing to place a catastrophe stop fails the run (position would be unprotected)', async () => {
   const state = defaultState({ bars: { SPY: holdSeries(), TLT: holdSeries() } });
   state.positions.push({ symbol: 'SPY', qty: '100', avg_entry_price: '130', unrealized_pl: '0', unrealized_plpc: '0.0' });
